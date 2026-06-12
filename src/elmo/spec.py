@@ -52,6 +52,24 @@ class Budget(BaseModel):
     max_wallclock_hours: float = 4.0
 
 
+class RoleConfigRef(BaseModel):
+    provider: str
+    model: str
+
+
+class RolesSpec(BaseModel):
+    planner: RoleConfigRef | None = None
+    generator: RoleConfigRef | None = None
+    judge: RoleConfigRef | None = None
+
+
+class FoundryConfig(BaseModel):
+    enabled: bool = False
+    rows_target: int = 200
+    scenarios_per_brief: int = 50
+    mix_with_raw_fraction: float = 0.0  # 0.0 = all synthetic, 1.0 = all raw
+
+
 class TaskSpec(BaseModel):
     name: str = Field(..., description="Short slug for this task.")
     prompt: str = Field(..., description="The original natural-language ask.")
@@ -62,6 +80,8 @@ class TaskSpec(BaseModel):
     train: TrainConfig = Field(default_factory=TrainConfig)
     eval: EvalConfig
     budget: Budget = Field(default_factory=Budget)
+    foundry: FoundryConfig = Field(default_factory=FoundryConfig)
+    roles: RolesSpec = Field(default_factory=RolesSpec)
 
 
 def load_spec(path: str | Path) -> TaskSpec:

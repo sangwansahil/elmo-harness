@@ -12,7 +12,7 @@ elmo is an open-source harness that turns a natural-language prompt — *"build 
 
 Inspired by [Pioneer](https://pioneer.ai/blog/behind-pioneer) and built to run on anyone's laptop.
 
-> status: alpha. phase 0 rails only. see [PLAN.md](PLAN.md) for the roadmap.
+> status: alpha. phases 0–1 (rails + data foundry). see [PLAN.md](PLAN.md) for the roadmap.
 
 ## install
 
@@ -39,7 +39,9 @@ elmo eval --run <run_id>  # re-evaluate
 
 a single run prints a before/after number, writes artifacts to `./runs/<id>/`, and logs the run to a local sqlite database (`./.elmo/elmo.db`).
 
-## what works today (phase 0)
+## what works today
+
+**phase 0 — rails**
 
 - task spec parser (yaml + pydantic contract)
 - mlx-lm lora fine-tune driver for apple silicon
@@ -47,10 +49,21 @@ a single run prints a before/after number, writes artifacts to `./runs/<id>/`, a
 - minimal bfcl-style verifier (function name + json args)
 - sqlite run state, jsonl artifact log
 
+**phase 1 — data foundry**
+
+- provider layer: openai-compatible (openai, openrouter, groq, deepseek,
+  together, cerebras, lmstudio, ollama) + anthropic native; stdlib http, no deps
+- planner / generator / judge roles, configured via spec, env vars, or defaults
+- verifier-first synthetic data: strong planner emits scenarios, cheap generator
+  produces rows, deterministic filter rejects malformed ones
+- per-row provenance log (planner model, generator model, token counts,
+  verifier verdict, seed-prompt hash)
+- `elmo plan <spec>` dry-runs the planner; `elmo providers` and `elmo doctor`
+  show what is configured
+
 ## what is coming (see [PLAN.md](PLAN.md))
 
 - closed-loop diagnose + monotonic regression suite
-- planner/generator/judge model roles with byok + free-tier providers
 - grpo training on verifiable rewards
 - web ui per [DESIGN.md](DESIGN.md)
 - public trajectory prior on hugging face

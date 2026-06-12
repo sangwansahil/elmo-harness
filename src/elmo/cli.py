@@ -104,6 +104,9 @@ def list_runs(limit: int = typer.Option(20, "--limit", "-n")) -> None:
 @app.command()
 def doctor() -> None:
     """Diagnose the local environment."""
+    from elmo.providers import KNOWN_PROVIDERS, list_available
+    from elmo.roles import resolve_role
+
     backend = detect_backend()
     console.print(f"[dim]backend[/dim]   {backend}")
     for mod in ("mlx_lm", "datasets", "huggingface_hub", "pydantic", "typer", "yaml"):
@@ -112,6 +115,58 @@ def doctor() -> None:
             console.print(f"[green]ok[/green]        {mod}")
         except ImportError as e:
             console.print(f"[red]missing[/red]   {mod}  ({e})")
+
+    console.print()
+    available = set(list_available())
+    for name, cfg in KNOWN_PROVIDERS.items():
+        mark = "[green]on[/green]" if name in available else "[dim]off[/dim]"
+        key = cfg.env_key or "(no key needed)"
+        console.print(f"{mark:>16}  {name:<12}  {key}")
+
+    console.print()
+    for role in ("planner", "generator", "judge"):
+        r = resolve_role(role)  # type: ignore[arg-type]
+        if r:
+            console.print(f"[dim]{role:>9s}[/dim]   {r.provider}/{r.model}")
+        else:
+            console.print(f"[dim]{role:>9s}[/dim]   [yellow]not configured[/yellow]")
+
+
+@app.command()
+def plan(
+    spec_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    n: int = typer.Option(5, "-n", help="number of scenarios to plan"),
+) -> None:
+    """Dry-run the planner: produce a brief and print it without generating data."""
+    from elmo.foundry.planner import build_brief
+    from elmo.roles import resolve_role
+    from elmo.spec import load_spec
+
+    spec = load_spec(spec_path)
+    planner_cfg = resolve_role("planner")
+    if planner_cfg is None:
+        console.print("[red]no planner role configured.[/red] try: elmo doctor")
+        raise typer.Exit(2)
+    console.print(f"[dim]planner[/dim] {planner_cfg.provider}/{planner_cfg.model}")
+    brief = build_brief(spec=spec, planner_cfg=planner_cfg, n_scenarios=n)
+    console.print(brief.model_dump_json(indent=2))
+
+
+@app.command()
+def providers() -> None:
+    """List supported providers and which are currently configured."""
+    from elmo.providers import KNOWN_PROVIDERS, list_available
+
+    available = set(list_available())
+    t = Table(show_header=True, header_style="dim", border_style="dim")
+    t.add_column("provider")
+    t.add_column("base url", style="dim")
+    t.add_column("env var", style="dim")
+    t.add_column("status")
+    for name, cfg in KNOWN_PROVIDERS.items():
+        status = "[green]on[/green]" if name in available else "[dim]off[/dim]"
+        t.add_row(name, cfg.base_url, cfg.env_key or "—", status)
+    console.print(t)
 
 
 if __name__ == "__main__":

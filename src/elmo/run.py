@@ -21,6 +21,8 @@ from elmo.data.xlam import (
     write_sft_jsonl,
 )
 from elmo.eval.function_calling import FunctionCallEvaluator, ScoreReport
+from elmo.foundry import run_foundry
+from elmo.roles import RoleConfig, resolve_role
 from elmo.spec import TaskSpec
 from elmo.storage import Storage
 
@@ -61,6 +63,19 @@ def _split(rows: list[dict], val_frac: float = 0.1, eval_n: int = 100) -> tuple[
     val_rows = rows[eval_n : eval_n + val_n]
     train_rows = rows[eval_n + val_n :]
     return train_rows, val_rows, eval_rows
+
+
+def _merge_train_jsonl(
+    synthetic: Path, raw: Path, mix_with_raw_fraction: float, out: Path
+) -> Path:
+    """Concatenate synthetic + raw rows by ratio. Synthetic-first ordering."""
+    syn_lines = [ln for ln in synthetic.read_text().splitlines() if ln.strip()]
+    raw_lines = [ln for ln in raw.read_text().splitlines() if ln.strip()]
+    target_raw = int(len(syn_lines) * mix_with_raw_fraction / max(1e-6, 1 - mix_with_raw_fraction))
+    merged = syn_lines + raw_lines[:target_raw]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(merged) + "\n")
+    return out
 
 
 def _print_header(spec: TaskSpec, run_id: str, backend_name: str) -> None:
@@ -134,7 +149,43 @@ def execute(
     n_train = write_sft_jsonl(train_rows, train_jsonl)
     n_val = write_sft_jsonl(val_rows, val_jsonl)
     n_eval = write_eval_jsonl(eval_rows, eval_jsonl)
-    tick("data", f"train={n_train} valid={n_val} eval={n_eval}")
+    tick("data", f"raw xlam: train={n_train} valid={n_val} eval={n_eval}")
+
+    if spec.foundry.enabled:
+        planner_cfg = resolve_role(
+            "planner",
+            RoleConfig(**spec.roles.planner.model_dump()) if spec.roles.planner else None,
+        )
+        gen_cfg = resolve_role(
+            "generator",
+            RoleConfig(**spec.roles.generator.model_dump()) if spec.roles.generator else None,
+        )
+        if planner_cfg is None or gen_cfg is None:
+            tick("foundry", "skipped — no provider keys for planner or generator")
+        else:
+            tick("plan", f"planner {planner_cfg.provider}/{planner_cfg.model}")
+            foundry_dir = artifact_dir / "foundry"
+            result = run_foundry(
+                spec=spec,
+                planner_cfg=planner_cfg,
+                generator_cfg=gen_cfg,
+                artifact_dir=foundry_dir,
+                n_scenarios=spec.foundry.scenarios_per_brief,
+                iteration=0,
+                progress=tick,
+            )
+            tick(
+                "foundry",
+                f"accepted {result.accepted} / rejected {result.rejected} / "
+                f"gen_failed {result.generator_failed}",
+            )
+            train_jsonl = _merge_train_jsonl(
+                synthetic=result.sft_jsonl,
+                raw=train_jsonl,
+                mix_with_raw_fraction=spec.foundry.mix_with_raw_fraction,
+                out=artifact_dir / "train.merged.jsonl",
+            )
+            tick("data", f"training on {sum(1 for _ in train_jsonl.open())} merged rows")
 
     evaluator = FunctionCallEvaluator(eval_jsonl)
 

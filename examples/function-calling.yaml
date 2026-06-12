@@ -48,3 +48,21 @@ budget:
   max_iterations: 1
   max_dollars: 0.0
   max_wallclock_hours: 2.0
+
+# the foundry block is optional. with it disabled (default), elmo trains on raw
+# xlam. with it enabled and a planner+generator provider configured, elmo first
+# plans scenarios with a strong model, generates rows with a cheap model,
+# verifier-filters them, and trains on the result.
+foundry:
+  enabled: false
+  rows_target: 200
+  scenarios_per_brief: 50
+  mix_with_raw_fraction: 0.0  # 0.0 = all synthetic; 1.0 = all raw
+
+# roles bind planner/generator/judge to (provider, model). leave blank to use
+# defaults based on which provider env keys are set (see `elmo doctor`).
+roles:
+  planner: null
+  generator: null
+  judge: null
+
