@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.installed.cfg
+pip-wheel-metadata/
+
+# Virtual envs
+.venv/
+venv/
+env/
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# elmo runtime
+.elmo/
+runs/
+artifacts/
+*.db
+*.sqlite
+*.sqlite-journal
+hf_cache/
+mlx_cache/
+exports/
+
+# Datasets, checkpoints, adapters
+data/raw/
+data/generated/
+checkpoints/
+adapters/
+*.safetensors
+*.gguf
+*.bin
+*.pt
+*.npz
+
+# Logs
+*.log
+wandb/
+mlruns/
+
+# Secrets
+.env
+.env.local
+config.local.yaml
+*.key
+
+# Claude Code session-local
+.claude/

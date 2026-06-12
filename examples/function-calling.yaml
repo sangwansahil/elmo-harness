@@ -1,0 +1,50 @@
+name: function-calling
+prompt: build me a function-calling expert under 2b params that scores 75+ on bfcl
+
+base_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+backend: auto
+
+capabilities:
+  - name: tool_selection
+    description: choose the right tool name from the catalog
+    verifier: function_call
+    weight: 1.0
+  - name: arguments
+    description: extract structurally correct arguments
+    verifier: json_schema
+    weight: 1.5
+  - name: parallel_calls
+    description: emit multiple tool calls at once when warranted
+    verifier: function_call
+    weight: 1.0
+  - name: refusal
+    description: refuse or clarify on ambiguous input
+    verifier: judge
+    weight: 0.5
+
+dataset:
+  source: "hf:Salesforce/xlam-function-calling-60k"
+  split: train
+  max_rows: 2000
+
+train:
+  method: lora
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  learning_rate: 0.0002
+  batch_size: 4
+  max_seq_len: 2048
+  max_steps: 200
+  warmup_steps: 20
+  seed: 42
+
+eval:
+  benchmark: bfcl-simple
+  max_examples: 100
+  target_score: 0.75
+
+budget:
+  max_iterations: 1
+  max_dollars: 0.0
+  max_wallclock_hours: 2.0
