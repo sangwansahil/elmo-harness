@@ -100,7 +100,7 @@ See [DESIGN.md](DESIGN.md). One screen carries the product: the **run screen** �
 | 4 — GRPO | ✅ done | TRL GRPO on CUDA; RFT fallback on MLX | RL beats SFT-only on ≥1 capability |
 | 5 — gateway | ✅ done | provider tiers, BYOK config, free-tier wiring, caching | full run completes on free tier only |
 | 6 — prior + site | ✅ done | trajectory publish/retrieve; landing page, `curl \| sh` install | planner provably uses retrieved trajectories |
-| 7 — showcase | next | write-up; release 3 expert models (function calling + 2 more tasks) | published numbers, reproducible from the repo |
+| 7 — showcase | ✅ done | write-up; release 3 expert models (function calling + 2 more tasks) | published numbers, reproducible from the repo |
 
 ## 8. Locked defaults
 

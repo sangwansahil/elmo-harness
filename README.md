@@ -12,7 +12,7 @@ elmo is an open-source harness that turns a natural-language prompt — *"build 
 
 Inspired by [Pioneer](https://pioneer.ai/blog/behind-pioneer) and built to run on anyone's laptop.
 
-> status: alpha. phases 0–1 (rails + data foundry). see [PLAN.md](PLAN.md) for the roadmap.
+> status: beta. all eight phases of the [plan](PLAN.md) are landed. three example tasks ship in [SHOWCASE.md](SHOWCASE.md).
 
 ## install
 
@@ -32,9 +32,15 @@ pip install -e ".[mlx]"   # or .[cuda]
 
 ```sh
 elmo init
-elmo run examples/function-calling.yaml
-elmo runs                 # list past runs
-elmo eval --run <run_id>  # re-evaluate
+elmo run examples/function-calling.yaml      # the anchor task
+elmo run examples/math.yaml                  # gsm8k
+elmo run examples/json-structured.yaml       # structured extraction
+elmo serve                                   # localhost:7777 web ui
+elmo runs                                    # list past runs
+elmo regression list                         # show the permanent test cases
+elmo trajectory list                         # show the local public-prior corpus
+elmo preset apply free-openrouter            # one-line free-tier wiring
+elmo doctor                                  # what is wired on this machine
 ```
 
 a single run prints a before/after number, writes artifacts to `./runs/<id>/`, and logs the run to a local sqlite database (`./.elmo/elmo.db`).

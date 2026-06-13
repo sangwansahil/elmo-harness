@@ -1,0 +1,48 @@
+name: json-structured
+prompt: build me a structured-extraction model that always returns schema-valid json
+
+base_model: mlx-community/Qwen2.5-1.5B-Instruct-4bit
+backend: auto
+
+capabilities:
+  - name: parseable
+    description: the model output is decodable JSON
+    verifier: json_schema
+    weight: 1.0
+  - name: keys_present
+    description: all required keys are present
+    verifier: json_schema
+    weight: 1.0
+  - name: types_correct
+    description: each required key has the schema's expected type
+    verifier: json_schema
+    weight: 1.5
+
+dataset:
+  source: "synthetic:structured"
+  split: train
+  max_rows: 200
+
+train:
+  method: lora
+  objective: sft
+  lora_rank: 16
+  lora_alpha: 32
+  learning_rate: 0.0002
+  batch_size: 4
+  max_seq_len: 1024
+  max_steps: 150
+  seed: 42
+
+eval:
+  benchmark: json-format
+  max_examples: 60
+  target_score: 0.80
+
+budget:
+  max_iterations: 1
+  max_dollars: 0.0
+  max_wallclock_hours: 1.0
+
+foundry:
+  enabled: false

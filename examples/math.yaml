@@ -1,0 +1,42 @@
+name: math
+prompt: build me a grade-school math reasoner under 2b params that scores 65+ on gsm8k
+
+base_model: mlx-community/Qwen2.5-Math-1.5B-Instruct-4bit
+backend: auto
+
+capabilities:
+  - name: correctness
+    description: final answer matches ground truth (verifier-checked)
+    verifier: exact_match
+    weight: 1.0
+
+dataset:
+  source: "hf:openai/gsm8k"
+  split: train
+  max_rows: 2000
+
+train:
+  method: lora
+  objective: sft         # try 'rft' once sft converges
+  lora_rank: 16
+  lora_alpha: 32
+  learning_rate: 0.0002
+  batch_size: 2
+  max_seq_len: 1024
+  max_steps: 300
+  seed: 42
+
+eval:
+  benchmark: gsm8k
+  max_examples: 200
+  target_score: 0.65
+
+budget:
+  max_iterations: 2
+  max_dollars: 0.0
+  max_wallclock_hours: 3.0
+
+foundry:
+  enabled: false   # gsm8k has plenty of public data; foundry not required
+  rows_target: 200
+  scenarios_per_brief: 30

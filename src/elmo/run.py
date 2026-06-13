@@ -17,12 +17,10 @@ from rich.table import Table
 
 from elmo.backends import get_backend
 from elmo.config import Paths
-from elmo.data.xlam import (
-    load_xlam_function_calling,
-    write_eval_jsonl,
-    write_sft_jsonl,
-)
-from elmo.eval.function_calling import FunctionCallEvaluator, ScoreReport
+from elmo.data import load_dataset as _generic_load_dataset
+from elmo.data import write_eval_jsonl, write_sft_jsonl
+from elmo.eval import make_evaluator
+from elmo.eval.function_calling import ScoreReport
 from elmo.foundry import run_foundry
 from elmo.loop import (
     GateResult,
@@ -67,13 +65,12 @@ def _new_run_id() -> str:
 
 
 def _load_dataset(spec: TaskSpec, cache_dir: Path) -> list[dict]:
-    if spec.dataset.source == "hf:Salesforce/xlam-function-calling-60k":
-        return load_xlam_function_calling(
-            max_rows=spec.dataset.max_rows,
-            split=spec.dataset.split,
-            cache_dir=cache_dir,
-        )
-    raise NotImplementedError(f"unknown dataset source: {spec.dataset.source}")
+    return _generic_load_dataset(
+        source=spec.dataset.source,
+        max_rows=spec.dataset.max_rows,
+        split=spec.dataset.split,
+        cache_dir=cache_dir,
+    )
 
 
 def _split(
@@ -132,7 +129,13 @@ def _promote_failures(
     iteration: int,
     run_id: str,
 ) -> int:
-    """Each failing eval example becomes a permanent regression case."""
+    """Each failing eval example becomes a permanent regression case.
+
+    Currently only function-calling eval rows have the right shape; other
+    benchmarks no-op here until the suite is generalized.
+    """
+    if not eval_rows or "expected_calls" not in eval_rows[0]:
+        return 0
     n_new = 0
     by_query = {r["query"]: r for r in eval_rows}
     for e in final.per_example:
@@ -206,7 +209,7 @@ def execute(
 
     # Materialize the eval rows we just wrote (round-trip = same as evaluator sees)
     eval_rows = [json.loads(line) for line in eval_jsonl.read_text().splitlines() if line.strip()]
-    evaluator = FunctionCallEvaluator(eval_jsonl)
+    evaluator = make_evaluator(spec.eval.benchmark, eval_jsonl)
 
     regression_path = Path.cwd() / "runs" / f"{spec.name}.regression.jsonl"
     regression = RegressionSuite(regression_path)
