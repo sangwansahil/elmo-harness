@@ -1,10 +1,12 @@
-"""The Phase 0 loop: spec -> data -> baseline eval -> train -> eval -> record."""
+"""The closed loop: spec -> data -> baseline -> (foundry -> train -> eval ->
+diagnose -> gate -> regression-promote)* -> export."""
 
 from __future__ import annotations
 
 import json
+import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -22,6 +24,13 @@ from elmo.data.xlam import (
 )
 from elmo.eval.function_calling import FunctionCallEvaluator, ScoreReport
 from elmo.foundry import run_foundry
+from elmo.loop import (
+    GateResult,
+    RegressionSuite,
+    capability_vector,
+    diagnose,
+    evaluate_gate,
+)
 from elmo.roles import RoleConfig, resolve_role
 from elmo.spec import TaskSpec
 from elmo.storage import Storage
@@ -31,12 +40,26 @@ console = Console()
 
 
 @dataclass
+class IterationRecord:
+    n: int
+    score: ScoreReport
+    regression_score: float | None
+    gate: GateResult | None
+    adapter_path: Path
+    n_new_regression_cases: int
+    foundry_accepted: int = 0
+    duration_s: float = 0.0
+
+
+@dataclass
 class RunResult:
     run_id: str
     baseline: ScoreReport
-    final: ScoreReport
+    best: ScoreReport
+    best_iteration: int
     adapter_path: Path | None
     artifact_dir: Path
+    iterations: list[IterationRecord] = field(default_factory=list)
 
 
 def _new_run_id() -> str:
@@ -50,25 +73,21 @@ def _load_dataset(spec: TaskSpec, cache_dir: Path) -> list[dict]:
             split=spec.dataset.split,
             cache_dir=cache_dir,
         )
-    raise NotImplementedError(
-        f"phase 0 only ships the xlam loader. got: {spec.dataset.source}"
-    )
+    raise NotImplementedError(f"unknown dataset source: {spec.dataset.source}")
 
 
-def _split(rows: list[dict], val_frac: float = 0.1, eval_n: int = 100) -> tuple[list[dict], list[dict], list[dict]]:
+def _split(
+    rows: list[dict], val_frac: float = 0.1, eval_n: int = 100
+) -> tuple[list[dict], list[dict], list[dict]]:
     n = len(rows)
     eval_n = min(eval_n, max(10, n // 10))
     val_n = max(8, int(n * val_frac))
-    eval_rows = rows[:eval_n]
-    val_rows = rows[eval_n : eval_n + val_n]
-    train_rows = rows[eval_n + val_n :]
-    return train_rows, val_rows, eval_rows
+    return rows[eval_n + val_n :], rows[eval_n : eval_n + val_n], rows[:eval_n]
 
 
 def _merge_train_jsonl(
     synthetic: Path, raw: Path, mix_with_raw_fraction: float, out: Path
 ) -> Path:
-    """Concatenate synthetic + raw rows by ratio. Synthetic-first ordering."""
     syn_lines = [ln for ln in synthetic.read_text().splitlines() if ln.strip()]
     raw_lines = [ln for ln in raw.read_text().splitlines() if ln.strip()]
     target_raw = int(len(syn_lines) * mix_with_raw_fraction / max(1e-6, 1 - mix_with_raw_fraction))
@@ -83,33 +102,66 @@ def _print_header(spec: TaskSpec, run_id: str, backend_name: str) -> None:
         f"[dim]run[/dim] {run_id}\n"
         f"[dim]task[/dim] {spec.name}\n"
         f"[dim]base[/dim] {spec.base_model}\n"
-        f"[dim]backend[/dim] {backend_name}"
+        f"[dim]backend[/dim] {backend_name}\n"
+        f"[dim]iters[/dim] {spec.budget.max_iterations}"
     )
     console.print(Panel.fit(body, title="elmo", border_style="dim"))
 
 
-def _print_scores(label: str, baseline: ScoreReport, final: ScoreReport | None = None) -> None:
-    t = Table(title=label, show_header=True, header_style="dim", border_style="dim")
+def _print_capability_table(records: list[IterationRecord], baseline: ScoreReport) -> None:
+    t = Table(show_header=True, header_style="dim", border_style="dim", title="capabilities")
     t.add_column("capability", style="dim")
     t.add_column("baseline", justify="right")
-    if final is not None:
-        t.add_column("final", justify="right")
-        t.add_column("Δ", justify="right")
-    for key, attr in [
-        ("tool selection", "tool_selection"),
-        ("arguments", "arguments"),
-        ("parallel calls", "parallel_calls"),
-        ("overall", "overall"),
-    ]:
-        b = getattr(baseline, attr)
-        row = [key, f"{b:.3f}"]
-        if final is not None:
-            f = getattr(final, attr)
-            d = f - b
-            sign = "+" if d >= 0 else ""
-            row += [f"{f:.3f}", f"{sign}{d:.3f}"]
+    for r in records:
+        t.add_column(f"iter {r.n}", justify="right")
+    for key in ("tool_selection", "arguments", "parallel_calls", "overall"):
+        row = [key.replace("_", " "), f"{getattr(baseline, key):.3f}"]
+        for r in records:
+            v = getattr(r.score, key)
+            d = v - getattr(baseline, key)
+            cell = f"{v:.3f} ({d:+.3f})"
+            row.append(cell)
         t.add_row(*row)
     console.print(t)
+
+
+def _promote_failures(
+    final: ScoreReport,
+    regression: RegressionSuite,
+    eval_rows: list[dict],
+    iteration: int,
+    run_id: str,
+) -> int:
+    """Each failing eval example becomes a permanent regression case."""
+    n_new = 0
+    by_query = {r["query"]: r for r in eval_rows}
+    for e in final.per_example:
+        if e.get("c2", 0.0) >= 1.0:
+            continue
+        query = e.get("query", "")
+        source = by_query.get(query) or by_query.get(query.split("\n")[0])
+        if source is None:
+            continue
+        # Bucket into the most relevant capability with the same heuristic as diagnose.
+        expected = e.get("expected") or []
+        if len(expected) > 1:
+            cap = "parallel_calls"
+        elif e.get("c1", 0.0) >= 1.0:
+            cap = "arguments"
+        else:
+            cap = "tool_selection"
+        added = regression.add_failure(
+            capability=cap,
+            query=source["query"],
+            tools=source["tools"],
+            expected_calls=source["expected_calls"],
+            system=source["system"],
+            iteration=iteration,
+            source_run_id=run_id,
+        )
+        if added is not None:
+            n_new += 1
+    return n_new
 
 
 def execute(
@@ -140,54 +192,26 @@ def execute(
         if progress:
             progress(stage, msg)
 
+    # --- one-time setup: load data, baseline eval, regression suite -----------
     tick("data", f"loading {spec.dataset.source} (max_rows={spec.dataset.max_rows})")
     rows = _load_dataset(spec, paths.cache)
-    train_rows, val_rows, eval_rows = _split(rows, eval_n=spec.eval.max_examples)
-    train_jsonl = artifact_dir / "train.jsonl"
+    train_rows, val_rows, eval_rows_raw = _split(rows, eval_n=spec.eval.max_examples)
+    raw_train_jsonl = artifact_dir / "train.raw.jsonl"
     val_jsonl = artifact_dir / "valid.jsonl"
     eval_jsonl = artifact_dir / "eval.jsonl"
-    n_train = write_sft_jsonl(train_rows, train_jsonl)
+    n_train = write_sft_jsonl(train_rows, raw_train_jsonl)
     n_val = write_sft_jsonl(val_rows, val_jsonl)
-    n_eval = write_eval_jsonl(eval_rows, eval_jsonl)
-    tick("data", f"raw xlam: train={n_train} valid={n_val} eval={n_eval}")
+    n_eval = write_eval_jsonl(eval_rows_raw, eval_jsonl)
+    tick("data", f"raw: train={n_train} valid={n_val} eval={n_eval}")
 
-    if spec.foundry.enabled:
-        planner_cfg = resolve_role(
-            "planner",
-            RoleConfig(**spec.roles.planner.model_dump()) if spec.roles.planner else None,
-        )
-        gen_cfg = resolve_role(
-            "generator",
-            RoleConfig(**spec.roles.generator.model_dump()) if spec.roles.generator else None,
-        )
-        if planner_cfg is None or gen_cfg is None:
-            tick("foundry", "skipped — no provider keys for planner or generator")
-        else:
-            tick("plan", f"planner {planner_cfg.provider}/{planner_cfg.model}")
-            foundry_dir = artifact_dir / "foundry"
-            result = run_foundry(
-                spec=spec,
-                planner_cfg=planner_cfg,
-                generator_cfg=gen_cfg,
-                artifact_dir=foundry_dir,
-                n_scenarios=spec.foundry.scenarios_per_brief,
-                iteration=0,
-                progress=tick,
-            )
-            tick(
-                "foundry",
-                f"accepted {result.accepted} / rejected {result.rejected} / "
-                f"gen_failed {result.generator_failed}",
-            )
-            train_jsonl = _merge_train_jsonl(
-                synthetic=result.sft_jsonl,
-                raw=train_jsonl,
-                mix_with_raw_fraction=spec.foundry.mix_with_raw_fraction,
-                out=artifact_dir / "train.merged.jsonl",
-            )
-            tick("data", f"training on {sum(1 for _ in train_jsonl.open())} merged rows")
-
+    # Materialize the eval rows we just wrote (round-trip = same as evaluator sees)
+    eval_rows = [json.loads(line) for line in eval_jsonl.read_text().splitlines() if line.strip()]
     evaluator = FunctionCallEvaluator(eval_jsonl)
+
+    regression_path = Path.cwd() / "runs" / f"{spec.name}.regression.jsonl"
+    regression = RegressionSuite(regression_path)
+    if regression.cases:
+        tick("regression", f"loaded {len(regression.cases)} prior cases from {regression_path.name}")
 
     def gen_baseline(prompts: list[str]) -> list[str]:
         return backend.generate(spec.base_model, None, prompts, max_tokens=512)
@@ -196,57 +220,160 @@ def execute(
     baseline = evaluator.evaluate(gen_baseline, max_examples=spec.eval.max_examples)
     storage.update_run(run_id, baseline_score=baseline.overall)
     storage.record_iteration(run_id, 0, baseline.overall, None, "baseline")
-    _print_scores("baseline", baseline)
+    _baseline_added = _promote_failures(baseline, regression, eval_rows, 0, run_id)
+    if _baseline_added:
+        tick("regression", f"+{_baseline_added} new cases from baseline failures")
 
-    tick("train", f"lora fine-tune ({spec.train.max_steps or 200} steps)")
-    train_result = backend.train(
-        spec=spec,
-        train_jsonl=train_jsonl,
-        val_jsonl=val_jsonl,
-        out_dir=artifact_dir,
+    # --- closed loop ----------------------------------------------------------
+    target = spec.eval.target_score
+    max_iters = max(1, spec.budget.max_iterations)
+    iterations: list[IterationRecord] = []
+    best_score = baseline
+    best_iter = 0
+    best_adapter: Path | None = None
+    best_vector = capability_vector(baseline)
+    diag_brief = ""
+
+    planner_cfg = resolve_role(
+        "planner", RoleConfig(**spec.roles.planner.model_dump()) if spec.roles.planner else None
     )
-    tick("train", f"done — train_loss={train_result.train_loss:.4f}")
+    gen_cfg = resolve_role(
+        "generator", RoleConfig(**spec.roles.generator.model_dump()) if spec.roles.generator else None
+    )
 
-    def gen_tuned(prompts: list[str]) -> list[str]:
-        return backend.generate(
-            spec.base_model, train_result.adapter_path, prompts, max_tokens=512
+    for n in range(1, max_iters + 1):
+        iter_t0 = time.time()
+        iter_dir = artifact_dir / f"iter_{n:02d}"
+        iter_dir.mkdir(parents=True, exist_ok=True)
+
+        train_jsonl = raw_train_jsonl
+        foundry_accepted = 0
+        if spec.foundry.enabled and planner_cfg and gen_cfg:
+            tick("plan", f"iter {n}: planner {planner_cfg.provider}/{planner_cfg.model}")
+            result = run_foundry(
+                spec=spec,
+                planner_cfg=planner_cfg,
+                generator_cfg=gen_cfg,
+                artifact_dir=iter_dir / "foundry",
+                n_scenarios=spec.foundry.scenarios_per_brief,
+                iteration=n,
+                baseline_notes=diag_brief,
+                progress=tick,
+            )
+            foundry_accepted = result.accepted
+            tick(
+                "foundry",
+                f"iter {n}: accepted {result.accepted} / rejected {result.rejected}",
+            )
+            train_jsonl = _merge_train_jsonl(
+                synthetic=result.sft_jsonl,
+                raw=raw_train_jsonl,
+                mix_with_raw_fraction=spec.foundry.mix_with_raw_fraction,
+                out=iter_dir / "train.merged.jsonl",
+            )
+
+        tick("train", f"iter {n}: lora fine-tune ({spec.train.max_steps or 200} steps)")
+        train_result = backend.train(
+            spec=spec, train_jsonl=train_jsonl, val_jsonl=val_jsonl, out_dir=iter_dir
         )
+        tick("train", f"iter {n}: done — train_loss={train_result.train_loss:.4f}")
 
-    tick("eval", "scoring fine-tuned model")
-    final = evaluator.evaluate(gen_tuned, max_examples=spec.eval.max_examples)
-    storage.update_run(run_id, final_score=final.overall, status="done")
-    storage.record_iteration(
-        run_id, 1, final.overall, final.overall - baseline.overall, "post-sft"
-    )
-    _print_scores("result", baseline, final)
+        def gen_tuned(prompts: list[str]) -> list[str]:
+            return backend.generate(
+                spec.base_model, train_result.adapter_path, prompts, max_tokens=512
+            )
 
-    (artifact_dir / "report.json").write_text(
-        json.dumps(
-            {
-                "run_id": run_id,
-                "spec": spec.model_dump(),
-                "baseline": baseline.as_dict(),
-                "final": final.as_dict(),
-                "delta": round(final.overall - baseline.overall, 4),
-                "train_loss": train_result.train_loss,
-                "adapter": str(train_result.adapter_path),
-            },
-            indent=2,
+        tick("eval", f"iter {n}: scoring on held-out")
+        score = evaluator.evaluate(gen_tuned, max_examples=spec.eval.max_examples)
+
+        # Score the regression suite separately so we know about cross-iteration regressions
+        regression_score: float | None = None
+        if regression.cases:
+            reg_path = iter_dir / "regression.eval.jsonl"
+            n_reg = regression.write_eval_jsonl(reg_path)
+            if n_reg > 0:
+                reg_eval = FunctionCallEvaluator(reg_path)
+                reg_report = reg_eval.evaluate(gen_tuned, max_examples=n_reg)
+                regression_score = reg_report.overall
+                tick("regression", f"iter {n}: suite score {regression_score:.3f} over {n_reg} cases")
+
+        gate = evaluate_gate(score, best_score, epsilon=0.005)
+        if gate.passed and score.overall >= best_score.overall:
+            best_score, best_iter, best_adapter = score, n, train_result.adapter_path
+            best_vector = capability_vector(score)
+            tick("gate", f"iter {n}: passed — {gate.deltas}")
+        else:
+            tick("gate", f"iter {n}: {gate.reason}; keeping iter {best_iter} as best")
+
+        # Promote failures into the regression suite, then ask the planner to diagnose
+        new_cases = _promote_failures(score, regression, eval_rows, n, run_id)
+        if new_cases:
+            tick("regression", f"iter {n}: +{new_cases} new cases (suite={len(regression.cases)})")
+
+        if planner_cfg and spec.foundry.enabled and n < max_iters:
+            tick("diagnose", f"iter {n}: clustering failures via {planner_cfg.provider}")
+            clusters = diagnose(score.per_example, planner_cfg)
+            (iter_dir / "diagnose.json").write_text(
+                json.dumps([{
+                    "id": c.id, "capability": c.capability, "size": c.size,
+                    "summary": c.summary, "corrective_brief": c.corrective_brief
+                } for c in clusters], indent=2)
+            )
+            if clusters:
+                # Hand the next iteration the largest cluster's corrective brief
+                clusters.sort(key=lambda c: c.size, reverse=True)
+                diag_brief = (
+                    f"prior iter {n} failed on '{clusters[0].capability}' "
+                    f"({clusters[0].size} cases). focus next: {clusters[0].corrective_brief}"
+                )
+
+        storage.record_iteration(
+            run_id, n, score.overall, score.overall - baseline.overall, f"iter {n}"
         )
-    )
-    console.print(
-        Panel.fit(
-            f"[dim]overall[/dim]  {baseline.overall:.3f} → {final.overall:.3f}  "
-            f"([{'green' if final.overall >= baseline.overall else 'red'}]"
-            f"{(final.overall - baseline.overall):+.3f}[/])",
-            title="result",
-            border_style="dim",
-        )
-    )
+        iterations.append(IterationRecord(
+            n=n, score=score, regression_score=regression_score, gate=gate,
+            adapter_path=train_result.adapter_path, n_new_regression_cases=new_cases,
+            foundry_accepted=foundry_accepted, duration_s=time.time() - iter_t0,
+        ))
+        _print_capability_table(iterations, baseline)
+
+        if target is not None and score.overall >= target:
+            tick("loop", f"iter {n}: target {target:.3f} reached. stopping.")
+            break
+        if len(iterations) >= 3 and all(
+            abs(it.score.overall - iterations[-3].score.overall) < 0.005 for it in iterations[-3:]
+        ):
+            tick("loop", f"iter {n}: 3-iter plateau. stopping early.")
+            break
+
+    storage.update_run(run_id, final_score=best_score.overall, status="done")
+    report = {
+        "run_id": run_id,
+        "spec": spec.model_dump(),
+        "baseline": baseline.as_dict(),
+        "best": best_score.as_dict(),
+        "best_iteration": best_iter,
+        "iterations": [{
+            "n": it.n, "score": it.score.as_dict(), "regression_score": it.regression_score,
+            "gate": {"passed": it.gate.passed if it.gate else None,
+                      "deltas": it.gate.deltas if it.gate else None,
+                      "regressions": it.gate.regressions if it.gate else None},
+            "n_new_regression_cases": it.n_new_regression_cases,
+            "foundry_accepted": it.foundry_accepted, "duration_s": round(it.duration_s, 1),
+        } for it in iterations],
+        "regression_suite": {"path": str(regression_path), "total_cases": len(regression.cases)},
+        "best_vector": best_vector,
+    }
+    (artifact_dir / "report.json").write_text(json.dumps(report, indent=2))
+
+    console.print(Panel.fit(
+        f"[dim]overall[/dim]  {baseline.overall:.3f} → {best_score.overall:.3f}  "
+        f"([{'green' if best_score.overall >= baseline.overall else 'red'}]"
+        f"{(best_score.overall - baseline.overall):+.3f}[/])  "
+        f"[dim]best iter[/dim] {best_iter}/{len(iterations)}",
+        title="result", border_style="dim",
+    ))
     return RunResult(
-        run_id=run_id,
-        baseline=baseline,
-        final=final,
-        adapter_path=train_result.adapter_path,
-        artifact_dir=artifact_dir,
+        run_id=run_id, baseline=baseline, best=best_score, best_iteration=best_iter,
+        adapter_path=best_adapter, artifact_dir=artifact_dir, iterations=iterations,
     )

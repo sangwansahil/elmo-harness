@@ -153,6 +153,43 @@ def plan(
 
 
 @app.command()
+def regression(
+    action: str = typer.Argument("list", help="list | show | clear"),
+    task: str = typer.Option("function-calling", "--task", "-t"),
+) -> None:
+    """Inspect or clear the regression suite for a task."""
+    from elmo.loop.regression import RegressionSuite
+
+    path = Path.cwd() / "runs" / f"{task}.regression.jsonl"
+    suite = RegressionSuite(path)
+    if action == "list":
+        by_cap = suite.by_capability()
+        if not by_cap:
+            console.print("[dim]no cases yet.[/dim]")
+            return
+        t = Table(show_header=True, header_style="dim", border_style="dim")
+        t.add_column("capability")
+        t.add_column("cases", justify="right")
+        t.add_column("fixed", justify="right")
+        for cap, cases in by_cap.items():
+            fixed = sum(1 for c in cases if c.fixed_in_iter is not None)
+            t.add_row(cap, str(len(cases)), str(fixed))
+        console.print(t)
+    elif action == "show":
+        for c in suite.cases[:50]:
+            console.print(
+                f"[dim]{c.id}[/dim] [dim]{c.capability}[/dim] iter={c.first_seen_iter} "
+                f"fixed={c.fixed_in_iter}\n  {c.query[:160]}"
+            )
+    elif action == "clear":
+        path.unlink(missing_ok=True)
+        console.print(f"[yellow]cleared[/yellow] {path}")
+    else:
+        console.print(f"[red]unknown action: {action}[/red] (use list, show, or clear)")
+        raise typer.Exit(2)
+
+
+@app.command()
 def providers() -> None:
     """List supported providers and which are currently configured."""
     from elmo.providers import KNOWN_PROVIDERS, list_available

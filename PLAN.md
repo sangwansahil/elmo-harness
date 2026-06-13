@@ -95,8 +95,8 @@ See [DESIGN.md](DESIGN.md). One screen carries the product: the **run screen** �
 |---|---|---|---|
 | 0 — rails | ✅ done | MLX LoRA SFT of Qwen2.5-1.5B on an xLAM slice; BFCL-simple before/after; SQLite run log | one command, one before/after number, reproducible |
 | 1 — foundry | ✅ done | planner→generator split, verifier-first filter, hard negatives, provenance log | synthetic data measurably beats raw-dataset baseline |
-| 2 — loop | next | diagnose, regression suite, vector gate, unattended n-iteration runs | overnight run improves BFCL with zero capability regressions |
-| 3 — UI | | daemon API + live web run screen per DESIGN.md | a stranger can read a run without docs |
+| 2 — loop | ✅ done | diagnose, regression suite, vector gate, unattended n-iteration runs | overnight run improves BFCL with zero capability regressions |
+| 3 — UI | next | daemon API + live web run screen per DESIGN.md | a stranger can read a run without docs |
 | 4 — GRPO | | TRL GRPO on CUDA; RFT fallback on MLX | RL beats SFT-only on ≥1 capability |
 | 5 — gateway | | provider tiers, BYOK config, free-tier wiring, caching | full run completes on free tier only |
 | 6 — prior + site | | trajectory publish/retrieve; landing page, `curl \| sh` install | planner provably uses retrieved trajectories |
