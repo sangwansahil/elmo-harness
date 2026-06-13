@@ -175,7 +175,7 @@ def execute(
     artifact_dir = paths.runs / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    backend = get_backend(spec.backend)
+    backend = get_backend(spec.backend, objective=spec.train.objective)
     storage.create_run(
         run_id=run_id,
         task_name=spec.name,

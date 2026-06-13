@@ -27,6 +27,7 @@ class DatasetRef(BaseModel):
 
 class TrainConfig(BaseModel):
     method: Literal["lora", "qlora", "full"] = "lora"
+    objective: Literal["sft", "rft", "grpo"] = "sft"
     lora_rank: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -38,6 +39,9 @@ class TrainConfig(BaseModel):
     warmup_steps: int = 50
     grad_accum_steps: int = 1
     seed: int = 42
+    rft_rounds: int = 2
+    rft_samples_per_prompt: int = 4
+    rft_accept_threshold: float = 0.65
 
 
 class EvalConfig(BaseModel):
