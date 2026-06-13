@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from .anthropic import AnthropicProvider
 from .base import ChatMessage, CompletionRequest, CompletionResponse, Provider
+from .cached import CachedProvider
 from .openai_compat import OpenAICompatibleProvider
 
 
@@ -23,6 +25,7 @@ __all__ = [
     "CompletionRequest",
     "CompletionResponse",
     "Provider",
+    "CachedProvider",
     "get_provider",
     "list_available",
     "KNOWN_PROVIDERS",
@@ -56,8 +59,13 @@ KNOWN_PROVIDERS: dict[str, ProviderConfig] = {
 }
 
 
-def get_provider(name: str) -> Provider:
-    """Return a Provider instance for the given name, reading the API key from env."""
+def get_provider(name: str, *, cache: bool = True) -> Provider:
+    """Return a Provider instance for the given name.
+
+    Reads the API key from env. If `cache` is True and the env var
+    ELMO_NO_CACHE is unset, the provider is wrapped in a CachedProvider that
+    deduplicates identical requests against `.elmo/cache/completions.db`.
+    """
     if name not in KNOWN_PROVIDERS:
         raise ValueError(
             f"unknown provider '{name}'. known: {sorted(KNOWN_PROVIDERS)}. "
@@ -71,8 +79,16 @@ def get_provider(name: str) -> Provider:
             f"local providers (lmstudio, ollama) don't need a key."
         )
     if cfg.flavor == "anthropic":
-        return AnthropicProvider(name=name, base_url=cfg.base_url, api_key=api_key or "")
-    return OpenAICompatibleProvider(name=name, base_url=cfg.base_url, api_key=api_key)
+        inner: Provider = AnthropicProvider(name=name, base_url=cfg.base_url, api_key=api_key or "")
+    else:
+        inner = OpenAICompatibleProvider(name=name, base_url=cfg.base_url, api_key=api_key)
+
+    if cache:
+        from elmo.cache import CompletionCache, cache_disabled
+        if not cache_disabled():
+            cache_path = Path.cwd() / ".elmo" / "cache" / "completions.db"
+            return CachedProvider(inner, CompletionCache(cache_path))
+    return inner
 
 
 def list_available() -> list[str]:

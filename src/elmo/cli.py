@@ -190,6 +190,64 @@ def regression(
 
 
 @app.command()
+def cache(action: str = typer.Argument("stats", help="stats | clear")) -> None:
+    """Inspect or clear the local completion cache."""
+    from elmo.cache import CompletionCache
+
+    db_path = Path.cwd() / ".elmo" / "cache" / "completions.db"
+    cache = CompletionCache(db_path)
+    if action == "stats":
+        s = cache.stats()
+        console.print(f"[dim]entries[/dim]                    {s['entries']}")
+        console.print(f"[dim]total cache hits[/dim]           {s['total_hits']}")
+        console.print(f"[dim]prompt tokens saved[/dim]        {s['prompt_tokens_saved']:,}")
+        console.print(f"[dim]completion tokens saved[/dim]    {s['completion_tokens_saved']:,}")
+        console.print(f"[dim]db[/dim]                         {db_path}")
+    elif action == "clear":
+        n = cache.clear()
+        console.print(f"[yellow]cleared[/yellow] {n} entries")
+    else:
+        console.print(f"[red]unknown action: {action}[/red] (use stats or clear)")
+        raise typer.Exit(2)
+
+
+@app.command()
+def preset(
+    action: str = typer.Argument("list", help="list | apply"),
+    name: str | None = typer.Argument(None, help="preset name (when action=apply)"),
+) -> None:
+    """List or apply a named role-config preset (e.g. free-openrouter)."""
+    from elmo.presets import PRESETS, list_presets
+
+    if action == "list":
+        for n in list_presets():
+            console.print(f"[dim]preset[/dim]  {n}")
+            for role, cfg in PRESETS[n].items():
+                console.print(f"  [dim]{role:>9s}[/dim]  {cfg.provider}/{cfg.model}")
+        return
+    if action == "apply":
+        if not name:
+            console.print("[red]preset apply requires a name[/red]")
+            raise typer.Exit(2)
+        if name not in PRESETS:
+            console.print(f"[red]unknown preset: {name}[/red]. choose from: {list_presets()}")
+            raise typer.Exit(2)
+        import yaml
+
+        out = Path.cwd() / ".elmo" / "roles.yaml"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(yaml.safe_dump(
+            {role: cfg.model_dump() for role, cfg in PRESETS[name].items()},
+            sort_keys=False,
+        ))
+        console.print(f"[green]applied[/green] preset '{name}' → {out}")
+        console.print("export the keys it expects, then re-run `elmo doctor` to confirm.")
+    else:
+        console.print(f"[red]unknown action: {action}[/red] (use list or apply)")
+        raise typer.Exit(2)
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(7777, "--port", "-p"),
