@@ -190,6 +190,22 @@ def regression(
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(7777, "--port", "-p"),
+    reload: bool = typer.Option(False, "--reload"),
+) -> None:
+    """Start the elmo daemon — REST API + WebSocket + local web UI."""
+    try:
+        from elmo.server import serve as _serve
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(2)
+    console.print(f"[dim]elmo daemon[/dim] http://{host}:{port}")
+    _serve(host=host, port=port, reload=reload)
+
+
+@app.command()
 def providers() -> None:
     """List supported providers and which are currently configured."""
     from elmo.providers import KNOWN_PROVIDERS, list_available

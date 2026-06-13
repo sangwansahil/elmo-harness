@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>elmo</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" />
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="logo mo">elmo</span>
+    <span class="micro">prompt &rarr; expert slm</span>
+  </div>
+  <nav class="nav">
+    <a href="#/" id="nav-runs">runs</a>
+    <a href="#/regression/function-calling" id="nav-reg">regression</a>
+    <a href="https://github.com/sangwansahil/elmo-harness" target="_blank" rel="noopener">github</a>
+  </nav>
+  <div class="meta mo" id="meta">&middot;</div>
+</header>
+
+<main id="view"></main>
+
+<template id="t-run-row">
+  <a class="row" href="">
+    <span class="mo id"></span>
+    <span class="task"></span>
+    <span class="mo model"></span>
+    <span class="mo base"></span>
+    <span class="mo delta"></span>
+    <span class="mo when"></span>
+    <span class="status"></span>
+  </a>
+</template>
+
+<template id="t-empty">
+  <div class="empty">
+    <p class="micro">nothing here yet.</p>
+    <p>start a run from the cli: <code class="mo">elmo run examples/function-calling.yaml</code></p>
+  </div>
+</template>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

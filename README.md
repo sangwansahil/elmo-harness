@@ -49,6 +49,30 @@ a single run prints a before/after number, writes artifacts to `./runs/<id>/`, a
 - minimal bfcl-style verifier (function name + json args)
 - sqlite run state, jsonl artifact log
 
+**phase 2 — closed loop**
+
+- multi-iteration `execute` loop: foundry (with diagnose-informed brief) →
+  train → eval → regression-suite eval → per-capability gate → promote
+  failures → diagnose
+- regression suite (`runs/<task>.regression.jsonl`) is monotonic, idempotent
+  on (capability, query), tracks `first_seen_iter` and `fixed_in_iter`, and
+  ships alongside the model as a proof of what cannot regress
+- gate compares the new capability vector against the best-so-far, not
+  aggregate; blocked if any gated capability regresses by more than epsilon
+- diagnose clusters failures by capability (deterministic) then asks the
+  planner for a one-paragraph summary + corrective brief per cluster, fed
+  to the next iteration's foundry call
+- early-stop on target hit, plateau, or budget exhaustion
+
+**phase 3 — web ui**
+
+- `elmo serve` starts a FastAPI daemon at `http://127.0.0.1:7777`
+- rest endpoints: `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/events`,
+  `/api/regression/{task}`, `/api/health`
+- websocket `/api/runs/{id}/live` streams stage events while a run is active
+- single-page vanilla-js ui (no build step), "instrument paper" design
+  language, dark "phosphor" + light "paper" via prefers-color-scheme
+
 **phase 1 — data foundry**
 
 - provider layer: openai-compatible (openai, openrouter, groq, deepseek,

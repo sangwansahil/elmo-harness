@@ -32,7 +32,8 @@ dependencies = [
 [project.optional-dependencies]
 mlx = ["mlx-lm>=0.18"]
 cuda = ["unsloth>=2024.8", "trl>=0.9"]
-dev = ["pytest>=8.0", "ruff>=0.5", "pyright>=1.1"]
+ui = ["fastapi>=0.110", "uvicorn[standard]>=0.30"]
+dev = ["pytest>=8.0", "ruff>=0.5", "pyright>=1.1", "fastapi>=0.110", "httpx>=0.27"]
 
 [project.scripts]
 elmo = "elmo.cli:app"
