@@ -11,6 +11,7 @@ import json
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -48,17 +49,22 @@ SYSTEM_PROMPT = (
 )
 
 
-def _user_prompt(spec: TaskSpec, n: int, baseline_notes: str = "") -> str:
+def _user_prompt(spec: TaskSpec, n: int, baseline_notes: str = "", prior_hits: str = "") -> str:
     caps = "\n".join(
         f"- {c.name} (weight {c.weight}, verifier {c.verifier}): {c.description}"
         for c in spec.capabilities
+    )
+    prior_block = (
+        f"\nRelevant past trajectories (from the open prior):\n{prior_hits}\n"
+        if prior_hits else ""
     )
     return (
         f"Task: {spec.name}\n"
         f"Original prompt: {spec.prompt}\n"
         f"Base model: {spec.base_model}\n\n"
-        f"Capabilities to train:\n{caps}\n\n"
-        f"Iteration context: {baseline_notes or 'first iteration, no prior eval'}\n\n"
+        f"Capabilities to train:\n{caps}\n"
+        f"{prior_block}"
+        f"\nIteration context: {baseline_notes or 'first iteration, no prior eval'}\n\n"
         f"Produce a JSON array of exactly {n} scenarios. Distribute scenarios across "
         f"capabilities according to their weights. Vary domain (weather, finance, code, "
         f"travel, biology, etc.), difficulty, and tool-catalog size. Include some "
@@ -121,6 +127,37 @@ def _extract_json_array(text: str) -> list[Any]:
     return arr
 
 
+def _format_prior_hits(spec: TaskSpec, k: int = 3) -> str:
+    """Look up similar trajectories from the local prior, format them as text."""
+    try:
+        from elmo.trajectory import Trajectory, TrajectoryStore, trajectory_from_report
+
+        path = Path.cwd() / "runs" / "trajectories.jsonl"
+        if not path.exists():
+            return ""
+        store = TrajectoryStore(path)
+        # Build a Trajectory shape from spec alone so we can search.
+        query = trajectory_from_report(
+            report={"baseline": {}, "best": {}, "iterations": []},
+            spec=spec.model_dump(),
+        )
+        hits = store.search(query, k=k)
+        if not hits:
+            return ""
+        lines = []
+        for score, t in hits:
+            if score < 0.05:
+                continue
+            lines.append(
+                f"- score={score:.2f} task={t.task_name} base={t.base_model.split('/')[-1]} "
+                f"objective={t.objective} delta={t.delta:+.3f} "
+                f"per_cap={t.per_capability_delta}"
+            )
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def build_brief(
     spec: TaskSpec,
     planner_cfg: RoleConfig,
@@ -129,10 +166,11 @@ def build_brief(
     baseline_notes: str = "",
 ) -> DataBrief:
     provider = get_provider(planner_cfg.provider)
+    prior_hits = _format_prior_hits(spec)
     req = CompletionRequest(
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _user_prompt(spec, n_scenarios, baseline_notes)},
+            {"role": "user", "content": _user_prompt(spec, n_scenarios, baseline_notes, prior_hits)},
         ],
         model=planner_cfg.model,
         temperature=0.7,

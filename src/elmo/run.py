@@ -366,6 +366,18 @@ def execute(
     }
     (artifact_dir / "report.json").write_text(json.dumps(report, indent=2))
 
+    # Append a trajectory to the local prior for future runs to retrieve from.
+    try:
+        from elmo.trajectory import TrajectoryStore, trajectory_from_report
+        traj = trajectory_from_report(report, spec.model_dump())
+        traj.planner_model = (planner_cfg.model if planner_cfg else "")
+        traj.generator_model = (gen_cfg.model if gen_cfg else "")
+        store = TrajectoryStore(Path.cwd() / "runs" / "trajectories.jsonl")
+        store.add(traj)
+        tick("trajectory", f"+1 ({traj.id}) appended to runs/trajectories.jsonl")
+    except Exception as e:
+        tick("trajectory", f"skipped: {e!r}")
+
     console.print(Panel.fit(
         f"[dim]overall[/dim]  {baseline.overall:.3f} → {best_score.overall:.3f}  "
         f"([{'green' if best_score.overall >= baseline.overall else 'red'}]"

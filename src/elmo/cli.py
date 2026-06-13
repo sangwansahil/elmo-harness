@@ -190,6 +190,67 @@ def regression(
 
 
 @app.command()
+def trajectory(
+    action: str = typer.Argument("list", help="list | publish | fetch | search"),
+    repo: str = typer.Option("sangwansahil/elmo-trajectories", "--repo"),
+    spec_path: Path | None = typer.Option(None, "--spec", help="for `search`"),
+) -> None:
+    """Inspect / sync the local trajectory prior."""
+    from elmo.trajectory import TrajectoryStore, fetch_from_hf, publish_to_hf
+
+    path = Path.cwd() / "runs" / "trajectories.jsonl"
+    store = TrajectoryStore(path)
+    if action == "list":
+        trajs = store.all()
+        if not trajs:
+            console.print("[dim]no trajectories yet — finish a run first.[/dim]")
+            return
+        t = Table(show_header=True, header_style="dim", border_style="dim")
+        for col in ("id", "task", "base", "obj", "iters", "Δ", "regs"):
+            t.add_column(col, style="dim" if col == "id" else None)
+        for tr in trajs:
+            t.add_row(
+                tr.id, tr.task_name, tr.base_model.split("/")[-1][:18],
+                tr.objective, str(tr.n_iterations),
+                f"{tr.delta:+.3f}", str(tr.regression_suite_size),
+            )
+        console.print(t)
+    elif action == "publish":
+        try:
+            url = publish_to_hf(store.all(), repo_id=repo)
+            console.print(f"[green]published[/green] {len(store.all())} trajectories → {url}")
+        except RuntimeError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(2)
+    elif action == "fetch":
+        try:
+            fetched = fetch_from_hf(repo_id=repo)
+            for tr in fetched:
+                store.add(tr)
+            console.print(f"[green]fetched[/green] {len(fetched)} trajectories from {repo}")
+        except (RuntimeError, FileNotFoundError) as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(2)
+    elif action == "search":
+        if not spec_path:
+            console.print("[red]search needs --spec <path>[/red]")
+            raise typer.Exit(2)
+        from elmo.spec import load_spec
+        from elmo.trajectory import trajectory_from_report
+        spec = load_spec(spec_path)
+        query = trajectory_from_report({"baseline": {}, "best": {}, "iterations": []}, spec.model_dump())
+        hits = store.search(query, k=5)
+        if not hits:
+            console.print("[dim]no relevant trajectories.[/dim]")
+            return
+        for score, tr in hits:
+            console.print(f"[dim]{score:.2f}[/dim]  {tr.task_name} · {tr.base_model.split('/')[-1]} · Δ {tr.delta:+.3f}")
+    else:
+        console.print(f"[red]unknown action: {action}[/red]")
+        raise typer.Exit(2)
+
+
+@app.command()
 def cache(action: str = typer.Argument("stats", help="stats | clear")) -> None:
     """Inspect or clear the local completion cache."""
     from elmo.cache import CompletionCache
