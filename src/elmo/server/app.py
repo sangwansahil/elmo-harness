@@ -336,8 +336,6 @@ def create_app(paths: Paths | None = None):
             raise HTTPException(400, "prompt and base_model required")
         guess = classify_prompt(prompt)
         spec = discover_task(prompt, base)
-        # Acceptance gates are derived from capability verifiers — surface them
-        # in plain language for the review screen.
         gates = []
         for cap in spec.capabilities:
             v = cap.verifier
@@ -349,6 +347,15 @@ def create_app(paths: Paths | None = None):
                 "judge": "an llm judge will score against the rubric",
             }.get(v, "rubric-checked by a judge")
             gates.append({"capability": cap.name, "verifier": v, "rule": text, "weight": cap.weight})
+
+        # Surface dataset access status so the review step can hand-hold the
+        # user through requesting HF access before they hit start training.
+        access = None
+        if spec.dataset.source.startswith("hf:"):
+            from elmo.hf_auth import dataset_access
+            repo_id = spec.dataset.source[3:]
+            access = dataset_access(repo_id).asdict()
+
         return {
             "guess": {
                 "kind": guess.kind,
@@ -362,7 +369,30 @@ def create_app(paths: Paths | None = None):
                 "kind": "hugging face" if spec.dataset.source.startswith("hf:") else "synthetic",
                 "max_rows": spec.dataset.max_rows,
             },
+            "access": access,
         }
+
+    @app.get("/api/hf/whoami")
+    def hf_whoami():
+        from elmo.hf_auth import whoami
+        return whoami().asdict()
+
+    @app.post("/api/hf/token")
+    def hf_set_token(payload: dict):
+        from elmo.hf_auth import save_token, whoami
+        token = (payload.get("token") or "").strip()
+        if not token:
+            raise HTTPException(400, "token required")
+        who = whoami(token)
+        if not who.configured:
+            raise HTTPException(400, who.error or "invalid token")
+        save_token(token)
+        return who.asdict()
+
+    @app.get("/api/hf/dataset")
+    def hf_dataset_access(repo_id: str):
+        from elmo.hf_auth import dataset_access
+        return dataset_access(repo_id).asdict()
 
     @app.post("/api/wizard/start")
     def wizard_start(payload: dict):

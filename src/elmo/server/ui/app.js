@@ -687,7 +687,6 @@ function renderStepReview() {
   head.appendChild(dl);
   view.appendChild(head);
 
-  // Capabilities + acceptance gates
   view.appendChild(el("h3", {}, "acceptance gates"));
   const gateCard = el("div", { class: "card" });
   const gateGrid = el("div", {
@@ -701,7 +700,6 @@ function renderStepReview() {
   gateCard.appendChild(gateGrid);
   view.appendChild(gateCard);
 
-  // Spec preview (collapsed-ish)
   view.appendChild(el("h3", {}, "training plan"));
   const planCard = el("div", { class: "card" });
   const plan = el("div", {
@@ -722,9 +720,25 @@ function renderStepReview() {
   planCard.appendChild(plan);
   view.appendChild(planCard);
 
+  // Hugging Face access gate — only shown when the dataset is HF.
+  const accessSlot = el("div", { id: "review-access" });
+  view.appendChild(accessSlot);
+  if (d.access) {
+    renderAccessGate(accessSlot, d, () => {
+      // when access becomes ok, just re-render the review step to flip the
+      // start button on without re-doing discovery.
+      route();
+    });
+  }
+
   const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "16px" } });
   actions.appendChild(el("button", { class: "btn ghost", onclick: () => { wizardState.step = 4; route(); } }, "← edit task"));
   const startBtn = el("button", { class: "btn primary" }, "start training →");
+  const accessOk = !d.access || d.access.accessible;
+  if (!accessOk) {
+    startBtn.setAttribute("disabled", "true");
+    startBtn.textContent = "verify hugging face access first ↑";
+  }
   startBtn.addEventListener("click", async () => {
     startBtn.setAttribute("disabled", "true");
     startBtn.textContent = "starting…";
@@ -733,7 +747,13 @@ function renderStepReview() {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ spec: d.spec }),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) {
+        const err = await readErr(r);
+        view.appendChild(errPanel(err));
+        startBtn.removeAttribute("disabled");
+        startBtn.textContent = "start training →";
+        return;
+      }
       const body = await r.json();
       wizardState.handle_id = body.run_id;
       wizardState.run_id = body.run_id;
@@ -742,12 +762,173 @@ function renderStepReview() {
     } catch (e) {
       startBtn.removeAttribute("disabled");
       startBtn.textContent = "start training →";
-      const err = el("p", { class: "micro", style: { color: "var(--fail)" } }, `start failed: ${e}`);
-      view.appendChild(err);
+      view.appendChild(errPanel({ error: "NetworkError", message: String(e) }));
     }
   });
   actions.appendChild(startBtn);
   view.appendChild(actions);
+}
+
+function renderAccessGate(slot, discovered, onReady) {
+  slot.innerHTML = "";
+  const access = discovered.access;
+  if (!access) return;
+
+  slot.appendChild(el("h3", {}, "hugging face access"));
+  const card = el("div", { class: "card" });
+
+  // Status row
+  const status = el("div", {
+    style: { display: "flex", alignItems: "baseline", gap: "10px", marginBottom: "10px" },
+  });
+  const dot = el("span", {
+    style: {
+      display: "inline-block", width: "8px", height: "8px", borderRadius: "50%",
+      background: access.accessible ? "var(--pass)" : "var(--accent)",
+    },
+  });
+  status.appendChild(dot);
+  status.appendChild(el("span", { class: "mo", style: { fontSize: "13px" } },
+    access.repo_id));
+  status.appendChild(el("span", { class: "micro" },
+    access.accessible ? "ready" : (access.gated === "manual" || access.gated === "auto" ? "gated" : "access needed")));
+  card.appendChild(status);
+
+  if (access.accessible) {
+    card.appendChild(el("p", { class: "micro" },
+      "we can read this dataset with your current token. you're good to start training."));
+    slot.appendChild(card);
+    return;
+  }
+
+  // Two-step instructions: token, then dataset access.
+  const instructions = el("ol", {
+    style: {
+      paddingLeft: "20px", margin: "8px 0 0",
+      fontSize: "13px", color: "var(--ink-2)", lineHeight: "1.7",
+    },
+  });
+
+  // Step 1 — token
+  const step1 = el("li", {});
+  step1.appendChild(el("strong", { style: { fontWeight: "500" } }, "get a hugging face read token"));
+  const step1Body = el("div", { class: "micro", style: { marginTop: "4px" } });
+  step1Body.innerHTML = (
+    "open <a href='https://huggingface.co/settings/tokens' target='_blank' rel='noopener' style='color: var(--accent)'>huggingface.co/settings/tokens</a> → " +
+    "click <em>new token</em> → name it something like <code style='color:var(--accent)'>elmo</code> → " +
+    "pick <em>read</em> access → click <em>generate</em> → copy the token (starts with <code style='color:var(--accent)'>hf_</code>)."
+  );
+  step1.appendChild(step1Body);
+  instructions.appendChild(step1);
+
+  // Step 2 — dataset access
+  const step2 = el("li", { style: { marginTop: "10px" } });
+  step2.appendChild(el("strong", { style: { fontWeight: "500" } }, "request access to the dataset"));
+  const step2Body = el("div", { class: "micro", style: { marginTop: "4px" } });
+  step2Body.innerHTML = (
+    "open the <a href='" + access.request_url + "' target='_blank' rel='noopener' style='color: var(--accent)'>dataset page</a> while logged in → " +
+    "read the terms → click <em>agree and access repository</em>. " +
+    "approval is automatic for most datasets, or within an hour for manual review."
+  );
+  step2.appendChild(step2Body);
+  instructions.appendChild(step2);
+
+  card.appendChild(instructions);
+
+  // Paste-token row
+  const tokenRow = el("div", { class: "field", style: { marginTop: "14px" } });
+  tokenRow.appendChild(el("label", {}, "paste your token"));
+  const tokenInput = el("input", { type: "password", placeholder: "hf_…" });
+  tokenRow.appendChild(tokenInput);
+  card.appendChild(tokenRow);
+
+  const statusLine = el("div", { class: "micro", style: { marginTop: "8px", minHeight: "16px" } });
+  card.appendChild(statusLine);
+
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "12px", flexWrap: "wrap" } });
+  const saveBtn = el("button", { class: "btn primary" }, "save & verify");
+  saveBtn.addEventListener("click", async () => {
+    const token = tokenInput.value.trim();
+    if (!token) { statusLine.textContent = "paste a token first."; statusLine.style.color = "var(--fail)"; return; }
+    saveBtn.setAttribute("disabled", "true");
+    statusLine.textContent = "validating…"; statusLine.style.color = "var(--ink-muted)";
+    try {
+      const r = await fetch("/api/hf/token", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      if (!r.ok) {
+        const err = await readErr(r);
+        statusLine.textContent = `✗ ${err.message || "invalid token"}`;
+        statusLine.style.color = "var(--fail)";
+        saveBtn.removeAttribute("disabled");
+        return;
+      }
+      const who = await r.json();
+      statusLine.textContent = `✓ token saved · signed in as ${who.username}`;
+      statusLine.style.color = "var(--pass)";
+      saveBtn.removeAttribute("disabled");
+      // Re-check dataset access with the new token.
+      await recheckAccess(slot, discovered, onReady);
+    } catch (e) {
+      statusLine.textContent = `✗ ${e}`;
+      statusLine.style.color = "var(--fail)";
+      saveBtn.removeAttribute("disabled");
+    }
+  });
+  actions.appendChild(saveBtn);
+
+  const recheckBtn = el("button", { class: "btn ghost" }, "↻ check access again");
+  recheckBtn.addEventListener("click", async () => {
+    recheckBtn.setAttribute("disabled", "true");
+    recheckBtn.textContent = "checking…";
+    await recheckAccess(slot, discovered, onReady);
+    recheckBtn.removeAttribute("disabled");
+    recheckBtn.textContent = "↻ check access again";
+  });
+  actions.appendChild(recheckBtn);
+
+  // Explicit escape hatch — user's choice, not a hidden default.
+  const skipBtn = el("button", {
+    class: "btn ghost",
+    style: { marginLeft: "auto", fontSize: "11px", color: "var(--ink-muted)" },
+  }, "skip · use 240-row offline seed instead");
+  skipBtn.addEventListener("click", () => {
+    discovered.spec.dataset.source = "synthetic:function-calling";
+    discovered.spec.dataset.max_rows = 240;
+    discovered.spec.eval.max_examples = Math.min(40, discovered.spec.eval.max_examples || 40);
+    discovered.access = null;
+    onReady();
+  });
+  actions.appendChild(skipBtn);
+
+  card.appendChild(actions);
+
+  // Why-block — when access not granted and reason is known.
+  if (access.why) {
+    card.appendChild(el("p", {
+      class: "micro",
+      style: { marginTop: "12px", color: "var(--ink-fade)" },
+    }, access.why));
+  }
+
+  slot.appendChild(card);
+}
+
+async function recheckAccess(slot, discovered, onReady) {
+  try {
+    const repo = discovered.spec.dataset.source.replace(/^hf:/, "");
+    const fresh = await api(`/api/hf/dataset?repo_id=${encodeURIComponent(repo)}`);
+    discovered.access = fresh;
+    if (fresh.accessible) {
+      onReady();
+    } else {
+      renderAccessGate(slot, discovered, onReady);
+    }
+  } catch (e) {
+    const status = slot.querySelector(".micro");
+    if (status) { status.textContent = `check failed: ${e}`; status.style.color = "var(--fail)"; }
+  }
 }
 
 function renderStepTrain() {
