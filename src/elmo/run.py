@@ -171,10 +171,11 @@ def execute(
     spec: TaskSpec,
     paths: Paths,
     progress: Callable[[str, str], None] | None = None,
+    run_id: str | None = None,
 ) -> RunResult:
     paths.ensure()
     storage = Storage(paths.db)
-    run_id = _new_run_id()
+    run_id = run_id or _new_run_id()
     artifact_dir = paths.runs / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
@@ -206,6 +207,42 @@ def execute(
     n_val = write_sft_jsonl(val_rows, val_jsonl)
     n_eval = write_eval_jsonl(eval_rows_raw, eval_jsonl)
     tick("data", f"raw: train={n_train} valid={n_val} eval={n_eval}")
+
+    # Foundry-seed path: no public dataset, generate everything from the prompt.
+    if n_eval == 0 and spec.foundry.enabled:
+        planner_cfg_seed = resolve_role(
+            "planner", RoleConfig(**spec.roles.planner.model_dump()) if spec.roles.planner else None
+        )
+        gen_cfg_seed = resolve_role(
+            "generator", RoleConfig(**spec.roles.generator.model_dump()) if spec.roles.generator else None
+        )
+        if planner_cfg_seed and gen_cfg_seed:
+            tick("foundry", "seeding from prompt (no public dataset configured)")
+            seed = run_foundry(
+                spec=spec,
+                planner_cfg=planner_cfg_seed,
+                generator_cfg=gen_cfg_seed,
+                artifact_dir=artifact_dir / "seed",
+                n_scenarios=spec.foundry.scenarios_per_brief,
+                iteration=0,
+                progress=tick,
+            )
+            if seed.accepted > 0:
+                lines = [ln for ln in seed.sft_jsonl.read_text().splitlines() if ln.strip()]
+                cut = max(8, len(lines) // 5)
+                raw_train_jsonl.write_text("\n".join(lines[cut:]) + "\n")
+                eval_jsonl.write_text(seed.eval_jsonl.read_text())
+                eval_rows_raw = [
+                    {"messages": [], "_eval": json.loads(line)}
+                    for line in eval_jsonl.read_text().splitlines() if line.strip()
+                ]
+                n_train = sum(1 for _ in raw_train_jsonl.open())
+                n_eval = sum(1 for _ in eval_jsonl.open())
+                tick("data", f"foundry seed: train={n_train} eval={n_eval}")
+            else:
+                tick("foundry", "seed produced zero accepted rows")
+        else:
+            tick("foundry", "skipped seed: no planner/generator role configured")
 
     # Materialize the eval rows we just wrote (round-trip = same as evaluator sees)
     eval_rows = [json.loads(line) for line in eval_jsonl.read_text().splitlines() if line.strip()]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from .gsm8k import load_gsm8k
@@ -22,6 +24,12 @@ def load_dataset(source: str, max_rows: int | None, split: str, cache_dir: Path 
         return load_gsm8k(max_rows=max_rows, split=split, cache_dir=cache_dir)
     if source == "synthetic:structured":
         return load_structured_seed(max_rows=max_rows, split=split, cache_dir=cache_dir)
+    if source == "synthetic:from-prompt":
+        # No public seed — the foundry generates everything from the prompt.
+        # We return a single dummy row so the splits don't divide-by-zero;
+        # _promote_failures skips non-function-calling shapes and the
+        # evaluator runs on whatever the foundry produces.
+        return []
     raise NotImplementedError(f"no loader registered for source: {source}")
 
 

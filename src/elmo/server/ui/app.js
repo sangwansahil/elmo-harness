@@ -266,7 +266,7 @@ async function renderRegression(task) {
 }
 
 // --- onboarding wizard ---------------------------------------------------
-const WIZARD_STEPS = ["diagnose", "choose", "download", "probe", "task", "data"];
+const WIZARD_STEPS = ["diagnose", "choose", "download", "probe", "task", "review", "train"];
 const wizardState = {
   step: 0,
   system: null,
@@ -276,6 +276,12 @@ const wizardState = {
   download_path: null,
   probe_done: false,
   task_text: "",
+  discovered: null,     // { spec, gates, guess, dataset_pretty }
+  run_id: null,         // actual run id once started
+  handle_id: null,      // wizard handle (for the runner)
+  run_done: false,
+  run_result: null,     // { baseline_overall, best_overall, adapter_path }
+  saved_to_hub: false,
 };
 
 function pip(filled, n = 5, accent = false) {
@@ -318,7 +324,8 @@ async function renderOnboard() {
   if (wizardState.step === 2) return renderStepDownload();
   if (wizardState.step === 3) return renderStepProbe();
   if (wizardState.step === 4) return renderStepTask();
-  if (wizardState.step === 5) return renderStepData();
+  if (wizardState.step === 5) return renderStepReview();
+  if (wizardState.step === 6) return renderStepTrain();
 }
 
 async function renderStepDiagnose() {
@@ -506,56 +513,284 @@ async function renderStepProbe() {
 function renderStepTask() {
   const card = el("div", { class: "card" });
   card.appendChild(el("div", { class: "lab" }, "what should this model be expert at?"));
-  card.appendChild(el("p", { class: "micro" }, "one sentence. elmo will pull data, generate scenarios, and kick off training."));
+  card.appendChild(el("p", { class: "micro" }, "one sentence is enough. elmo figures out the dataset, capabilities, and acceptance gates."));
   const f = el("div", { class: "field" });
   f.appendChild(el("label", {}, "task"));
   const ta = el("textarea", { id: "task-input" });
-  ta.value = wizardState.task_text || "build a function-calling expert that can handle parallel tool calls.";
+  ta.value = wizardState.task_text || "build a function-calling expert that handles parallel tool calls.";
   f.appendChild(ta);
   card.appendChild(f);
   const ex = el("p", { class: "micro" }, "examples: \"convert dates and times across timezones\" · \"extract structured json from invoices\" · \"solve grade-school math word problems\"");
   card.appendChild(ex);
   const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "10px" } });
   actions.appendChild(el("button", { class: "btn ghost", onclick: () => { wizardState.step = 3; route(); } }, "← back"));
-  actions.appendChild(el("button", {
-    class: "btn primary",
-    onclick: () => { wizardState.task_text = ta.value.trim(); wizardState.step = 5; route(); },
-  }, "discover data →"));
+  const discoverBtn = el("button", { class: "btn primary" }, "discover data →");
+  discoverBtn.addEventListener("click", async () => {
+    wizardState.task_text = ta.value.trim();
+    if (!wizardState.task_text) return;
+    discoverBtn.setAttribute("disabled", "true");
+    discoverBtn.textContent = "discovering…";
+    try {
+      const r = await fetch("/api/wizard/discover", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          prompt: wizardState.task_text,
+          base_model: wizardState.picked.hf_id_mlx,
+        }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      wizardState.discovered = await r.json();
+      wizardState.step = 5;
+      route();
+    } catch (e) {
+      discoverBtn.removeAttribute("disabled");
+      discoverBtn.textContent = "discover data →";
+      const err = el("p", { class: "micro", style: { color: "var(--fail)" } }, `discovery failed: ${e}`);
+      card.appendChild(err);
+    }
+  });
+  actions.appendChild(discoverBtn);
   card.appendChild(actions);
   view.appendChild(card);
 }
 
-function renderStepData() {
-  // Phase-1 hook: kick off `elmo run` via CLI in the user's terminal. The UI
-  // can't safely shell out to the python backend mid-request, so this step
-  // hands the user a ready-to-run command and shows them where the live view
-  // will appear once the run starts.
-  const m = wizardState.picked;
+function renderStepReview() {
+  const d = wizardState.discovered;
+  if (!d) { wizardState.step = 4; return route(); }
+
+  // Header: what elmo figured out
+  const head = el("div", { class: "card" });
+  head.appendChild(el("div", { class: "lab" }, "discovery"));
+  const dl = el("dl", { class: "kv" });
+  const kind = d.guess.kind.replace(/-/g, " ");
+  const conf = d.guess.confidence;
+  const confLabel = conf >= 0.66 ? "high" : conf >= 0.33 ? "medium" : conf > 0 ? "low" : "fallback";
+  for (const [k, v] of [
+    ["task kind", kind],
+    ["confidence", `${confLabel}${d.guess.matched_keywords.length ? " · " + d.guess.matched_keywords.join(", ") : ""}`],
+    ["dataset", `${d.dataset_pretty.source}  ·  up to ${d.dataset_pretty.max_rows.toLocaleString()} rows`],
+    ["base", wizardState.picked.display_name],
+  ]) {
+    dl.appendChild(el("dt", {}, k));
+    dl.appendChild(el("dd", { class: "mo" }, v));
+  }
+  head.appendChild(dl);
+  view.appendChild(head);
+
+  // Capabilities + acceptance gates
+  view.appendChild(el("h3", {}, "acceptance gates"));
+  const gateCard = el("div", { class: "card" });
+  const gateGrid = el("div", {
+    style: { display: "grid", gridTemplateColumns: "max-content 1fr max-content", gap: "8px 14px", fontSize: "13px" },
+  });
+  for (const g of d.gates) {
+    gateGrid.appendChild(el("span", { class: "lab" }, g.capability.replace(/_/g, " ")));
+    gateGrid.appendChild(el("span", { style: { color: "var(--ink-2)" } }, g.rule));
+    gateGrid.appendChild(el("span", { class: "mo", style: { color: "var(--ink-muted)" } }, g.verifier));
+  }
+  gateCard.appendChild(gateGrid);
+  view.appendChild(gateCard);
+
+  // Spec preview (collapsed-ish)
+  view.appendChild(el("h3", {}, "training plan"));
+  const planCard = el("div", { class: "card" });
+  const plan = el("div", {
+    style: { display: "grid", gridTemplateColumns: "max-content 1fr", gap: "6px 16px", fontSize: "13px" },
+  });
+  for (const [k, v] of [
+    ["objective", d.spec.train.objective || d.spec.train.method],
+    ["lora rank", d.spec.train.lora_rank],
+    ["max steps", d.spec.train.max_steps || "auto"],
+    ["benchmark", d.spec.eval.benchmark],
+    ["eval examples", d.spec.eval.max_examples],
+    ["target score", d.spec.eval.target_score],
+    ["foundry", d.spec.foundry.enabled ? `enabled · ${d.spec.foundry.scenarios_per_brief} scenarios` : "off"],
+  ]) {
+    plan.appendChild(el("span", { class: "lab" }, k));
+    plan.appendChild(el("span", { class: "mo" }, String(v)));
+  }
+  planCard.appendChild(plan);
+  view.appendChild(planCard);
+
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "16px" } });
+  actions.appendChild(el("button", { class: "btn ghost", onclick: () => { wizardState.step = 4; route(); } }, "← edit task"));
+  const startBtn = el("button", { class: "btn primary" }, "start training →");
+  startBtn.addEventListener("click", async () => {
+    startBtn.setAttribute("disabled", "true");
+    startBtn.textContent = "starting…";
+    try {
+      const r = await fetch("/api/wizard/start", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ spec: d.spec }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const body = await r.json();
+      wizardState.handle_id = body.run_id;
+      wizardState.run_id = body.run_id;
+      wizardState.step = 6;
+      route();
+    } catch (e) {
+      startBtn.removeAttribute("disabled");
+      startBtn.textContent = "start training →";
+      const err = el("p", { class: "micro", style: { color: "var(--fail)" } }, `start failed: ${e}`);
+      view.appendChild(err);
+    }
+  });
+  actions.appendChild(startBtn);
+  view.appendChild(actions);
+}
+
+function renderStepTrain() {
   const card = el("div", { class: "card" });
-  card.appendChild(el("div", { class: "lab" }, "ready to train"));
-  card.appendChild(el("p", { class: "micro" }, "elmo has everything it needs. start the run from your terminal:"));
-  const cmd = el("pre", {
-    style: {
-      background: "var(--surface-2)", padding: "12px 14px",
-      borderRadius: "var(--radius)", fontFamily: "var(--font-mono)",
-      fontSize: "12px", color: "var(--accent)", margin: "10px 0",
-      whiteSpace: "pre-wrap", wordBreak: "break-word",
-    },
-  }, `cat > examples/wizard.yaml <<'YAML'\nname: wizard\nprompt: ${wizardState.task_text}\nbase_model: ${m.hf_id_mlx}\nbackend: auto\ncapabilities:\n  - { name: correctness, verifier: judge, weight: 1.0 }\ndataset: { source: "synthetic:structured", split: train, max_rows: 200 }\ntrain: { method: lora, max_steps: 200 }\neval: { benchmark: bfcl-simple, max_examples: 50 }\nfoundry: { enabled: true, scenarios_per_brief: 30 }\nYAML\n\nelmo run examples/wizard.yaml`);
-  card.appendChild(cmd);
-  card.appendChild(el("p", { class: "micro" },
-    "once the run starts, its live view lands on the runs page. accepted vs rejected rows stream into the foundry log."));
-  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "8px" } });
-  actions.appendChild(el("button", {
-    class: "btn primary",
-    onclick: () => { location.hash = "#/"; },
-  }, "view runs →"));
+  card.appendChild(el("div", { class: "lab" }, "training"));
+  card.appendChild(el("p", { class: "micro" }, "live stream from the run loop. accepted vs rejected rows from the foundry, then sft steps, then eval."));
+
+  const counters = el("div", {
+    id: "wizard-counters",
+    style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px", margin: "14px 0" },
+  });
+  for (const [lab, id] of [
+    ["accepted", "ctr-accepted"],
+    ["rejected", "ctr-rejected"],
+    ["train step", "ctr-step"],
+    ["eval score", "ctr-score"],
+  ]) {
+    const cell = el("div", { style: { background: "var(--surface-2)", borderRadius: "var(--radius)", padding: "12px 14px" } });
+    cell.appendChild(el("div", { class: "lab" }, lab));
+    cell.appendChild(el("div", { class: "mo", style: { fontSize: "20px", color: "var(--ink)" } }, [el("span", { id }, "—")]));
+    counters.appendChild(cell);
+  }
+  card.appendChild(counters);
+
+  const stageEl = el("div", { class: "lab", id: "wizard-stage" }, "queued");
+  card.appendChild(stageEl);
+
+  const log = el("div", { class: "log", id: "wizard-log", style: { maxHeight: "320px", marginTop: "10px" } });
+  card.appendChild(log);
+
+  view.appendChild(card);
+
+  if (!wizardState.run_done) attachWizardLive();
+  else renderWizardDone(card);
+}
+
+function attachWizardLive() {
+  const run_id = wizardState.run_id;
+  if (!run_id) return;
+  const stageEl = document.getElementById("wizard-stage");
+  const logEl = document.getElementById("wizard-log");
+
+  let accepted = 0, rejected = 0;
+  let bestStep = 0;
+  let bestScore = null;
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+
+  // The actual run id may differ from the handle once execute() begins.
+  // Poll the handle once a second until it reports `done`, then refresh
+  // and pull the actual run id out of `extra`.
+  let pollHandle;
+  const pollOnce = async () => {
+    try {
+      const h = await api(`/api/wizard/runs/${wizardState.handle_id}`);
+      if (h.status === "done") {
+        wizardState.run_done = true;
+        wizardState.run_result = h.extra;
+        wizardState.run_id = h.extra.actual_run_id || wizardState.run_id;
+        clearInterval(pollHandle);
+        renderWizardDone(document.querySelector(".card"));
+      } else if (h.status === "error") {
+        stageEl.textContent = `error: ${h.error}`;
+        stageEl.style.color = "var(--fail)";
+        clearInterval(pollHandle);
+      }
+    } catch {}
+  };
+  pollHandle = setInterval(pollOnce, 1500);
+
+  // Tail events directly from the SQLite events table.
+  const ws = new WebSocket(`${proto}//${location.host}/api/runs/${run_id}/live`);
+  ws.onmessage = (m) => {
+    const e = JSON.parse(m.data);
+    if (e._status) return;
+    const line = el("div", {});
+    line.appendChild(el("span", { class: "ts" }, fmt.hms(e.created_at)));
+    line.appendChild(el("span", { class: "stg" }, e.stage));
+    line.appendChild(document.createTextNode(e.message));
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+    stageEl.textContent = `stage: ${e.stage}`;
+
+    // Lift counters from the message strings the run loop emits.
+    const acc = /accepted (\d+)/.exec(e.message);
+    if (acc) { accepted = +acc[1]; document.getElementById("ctr-accepted").textContent = accepted; }
+    const rej = /rejected (\d+)/.exec(e.message);
+    if (rej) { rejected = +rej[1]; document.getElementById("ctr-rejected").textContent = rejected; }
+    const stp = /step (\d[\d,]*)/.exec(e.message);
+    if (stp) { bestStep = +stp[1].replace(/,/g, ""); document.getElementById("ctr-step").textContent = bestStep.toLocaleString(); }
+    const sc = /overall\s+([0-9.]+)/.exec(e.message);
+    if (sc) { bestScore = +sc[1]; document.getElementById("ctr-score").textContent = bestScore.toFixed(3); }
+  };
+  ws.onerror = () => { stageEl.textContent = "websocket error"; };
+}
+
+function renderWizardDone(card) {
+  const r = wizardState.run_result || {};
+  const summary = el("div", { class: "card", style: { marginTop: "12px" } });
+  summary.appendChild(el("div", { class: "lab" }, "done"));
+  const dl = el("dl", { class: "kv", style: { marginTop: "6px" } });
+  for (const [k, v] of [
+    ["baseline", r.baseline_overall != null ? r.baseline_overall.toFixed(3) : "—"],
+    ["best", r.best_overall != null ? r.best_overall.toFixed(3) : "—"],
+    ["Δ", r.best_overall != null && r.baseline_overall != null ?
+      fmt.delta(r.best_overall - r.baseline_overall) : "—"],
+    ["best iter", r.best_iteration ?? "—"],
+    ["adapter", r.adapter_path || "—"],
+  ]) {
+    dl.appendChild(el("dt", {}, k));
+    dl.appendChild(el("dd", { class: "mo" }, v));
+  }
+  summary.appendChild(dl);
+
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "12px" } });
+  const saveBtn = el("button", { class: "btn primary" }, wizardState.saved_to_hub ? "saved ✓" : "save to elmo model hub");
+  if (wizardState.saved_to_hub) saveBtn.setAttribute("disabled", "true");
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.setAttribute("disabled", "true");
+    saveBtn.textContent = "saving…";
+    try {
+      const display = `${wizardState.picked.display_name} → ${wizardState.discovered.spec.name}`;
+      const resp = await fetch("/api/hub/save", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          display_name: display,
+          base_hf_id: wizardState.picked.hf_id_mlx,
+          adapter_path: r.adapter_path || "",
+          task_name: wizardState.discovered.spec.name,
+          run_id: wizardState.run_id,
+          baseline_score: r.baseline_overall,
+          final_score: r.best_overall,
+        }),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      wizardState.saved_to_hub = true;
+      saveBtn.textContent = "saved ✓";
+    } catch (e) {
+      saveBtn.textContent = "save failed — retry";
+      saveBtn.removeAttribute("disabled");
+    }
+  });
+  actions.appendChild(saveBtn);
   actions.appendChild(el("button", {
     class: "btn ghost",
-    onclick: () => { wizardState.step = 0; route(); },
-  }, "restart wizard"));
-  card.appendChild(actions);
-  view.appendChild(card);
+    onclick: () => { location.hash = `#/runs/${wizardState.run_id}`; },
+  }, "open run →"));
+  actions.appendChild(el("button", {
+    class: "btn ghost",
+    onclick: () => { location.hash = "#/hub"; },
+  }, "model hub →"));
+  summary.appendChild(actions);
+  card.appendChild(summary);
 }
 
 // --- model hub -----------------------------------------------------------

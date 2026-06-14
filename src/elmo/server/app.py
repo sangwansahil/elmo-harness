@@ -262,6 +262,86 @@ def create_app(paths: Paths | None = None):
             raise HTTPException(404, "no such entry")
         return {"ok": True}
 
+    # --- wizard task discovery + start --------------------------------------
+
+    @app.post("/api/wizard/discover")
+    def wizard_discover(payload: dict):
+        """Turn (prompt, base_model_hf_id) into a previewable TaskSpec."""
+        from elmo.wizard import classify_prompt, discover_task
+
+        prompt = (payload.get("prompt") or "").strip()
+        base = payload.get("base_model")
+        if not prompt or not base:
+            raise HTTPException(400, "prompt and base_model required")
+        guess = classify_prompt(prompt)
+        spec = discover_task(prompt, base)
+        # Acceptance gates are derived from capability verifiers — surface them
+        # in plain language for the review screen.
+        gates = []
+        for cap in spec.capabilities:
+            v = cap.verifier
+            text = {
+                "function_call": "function name and arguments must match the expected call",
+                "json_schema": "output must validate against the json schema",
+                "exact_match": "extracted answer must equal ground truth (numeric tolerance ok)",
+                "exec_python": "generated python must execute and return the expected value",
+                "judge": "an llm judge will score against the rubric",
+            }.get(v, "rubric-checked by a judge")
+            gates.append({"capability": cap.name, "verifier": v, "rule": text, "weight": cap.weight})
+        return {
+            "guess": {
+                "kind": guess.kind,
+                "confidence": guess.confidence,
+                "matched_keywords": guess.matched_keywords,
+            },
+            "spec": spec.model_dump(),
+            "gates": gates,
+            "dataset_pretty": {
+                "source": spec.dataset.source,
+                "kind": "hugging face" if spec.dataset.source.startswith("hf:") else "synthetic",
+                "max_rows": spec.dataset.max_rows,
+            },
+        }
+
+    @app.post("/api/wizard/start")
+    def wizard_start(payload: dict):
+        """Take a confirmed spec dict and kick off the run loop in the daemon."""
+        from elmo.server.runner import start_run
+        from elmo.spec import TaskSpec
+
+        spec_payload = payload.get("spec")
+        if not isinstance(spec_payload, dict):
+            raise HTTPException(400, "spec (dict) required")
+        try:
+            spec = TaskSpec.model_validate(spec_payload)
+        except Exception as e:
+            raise HTTPException(400, f"invalid spec: {e}") from e
+        handle = start_run(spec, paths)
+        return {
+            "run_id": handle.run_id,
+            "task_name": handle.task_name,
+            "base_model": handle.base_model,
+            "status": handle.status,
+            "started_at": handle.started_at,
+        }
+
+    @app.get("/api/wizard/runs/{run_id}")
+    def wizard_run_status(run_id: str):
+        from elmo.server.runner import get_handle
+        h = get_handle(run_id)
+        if not h:
+            raise HTTPException(404, "no such handle")
+        return {
+            "run_id": h.run_id,
+            "task_name": h.task_name,
+            "base_model": h.base_model,
+            "status": h.status,
+            "started_at": h.started_at,
+            "error": h.error,
+            "thread_alive": h.thread_alive,
+            "extra": h.extra,
+        }
+
     # --- static UI ----------------------------------------------------------
     if (UI_DIR / "index.html").exists():
         app.mount("/static", StaticFiles(directory=str(UI_DIR)), name="static")
