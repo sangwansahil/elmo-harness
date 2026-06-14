@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# elmo down — stop the daemon cleanly. idempotent.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+PID_FILE=".elmo/daemon.pid"
+say() { printf "  elmo  ::  %s\n" "$*"; }
+
+if [ ! -f "$PID_FILE" ]; then
+  say "not running."
+  exit 0
+fi
+
+PID=$(cat "$PID_FILE")
+if ! kill -0 "$PID" 2>/dev/null; then
+  say "stale pid file (pid $PID is gone). cleaning up."
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
+say "stopping pid $PID"
+kill "$PID"
+for i in $(seq 1 10); do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    rm -f "$PID_FILE"
+    say "down."
+    exit 0
+  fi
+  sleep 0.5
+done
+
+say "pid $PID still alive after SIGTERM, forcing SIGKILL"
+kill -9 "$PID" 2>/dev/null || true
+rm -f "$PID_FILE"
+say "down (force)."

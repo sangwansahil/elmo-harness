@@ -14,34 +14,75 @@ Inspired by [Pioneer](https://pioneer.ai/blog/behind-pioneer) and built to run o
 
 > status: beta. all eight phases of the [plan](PLAN.md) are landed. three example tasks ship in [SHOWCASE.md](SHOWCASE.md).
 
-## install
+## fire it up
+
+one command. handles uv, python 3.12, the venv, the right hardware extra
+(mlx on apple silicon, cuda on nvidia), the daemon, and opens your browser
+at the onboarding wizard.
 
 ```sh
-# apple silicon (mlx)
-pip install "elmo-harness[mlx] @ git+https://github.com/sangwansahil/elmo-harness"
-
-# nvidia (unsloth + trl)
-pip install "elmo-harness[cuda] @ git+https://github.com/sangwansahil/elmo-harness"
-
-# from source
 git clone https://github.com/sangwansahil/elmo-harness && cd elmo-harness
-pip install -e ".[mlx]"   # or .[cuda]
+./up
 ```
 
-## run
+then to stop:
 
 ```sh
-elmo init
-elmo run examples/function-calling.yaml      # the anchor task
-elmo run examples/math.yaml                  # gsm8k
-elmo run examples/json-structured.yaml       # structured extraction
-elmo serve                                   # localhost:7777 web ui
-elmo runs                                    # list past runs
-elmo regression list                         # show the permanent test cases
-elmo trajectory list                         # show the local public-prior corpus
-elmo preset apply free-openrouter            # one-line free-tier wiring
-elmo doctor                                  # what is wired on this machine
+./down
 ```
+
+`make up` / `make down` / `make restart` / `make logs` / `make status` /
+`make clean` work too. the daemon writes its pid to `.elmo/daemon.pid` and
+its log to `.elmo/daemon.log`, so it stays out of your terminal.
+
+## what you do next
+
+the wizard at http://127.0.0.1:7777/#/onboard walks you through it:
+
+1. diagnose your hardware (chip, ram, gpu, backend)
+2. pick a base model — "elmo's choice" is amber-outlined
+3. watch the download progress bar
+4. send one prompt to confirm the model loads
+5. describe in one sentence what the model should be expert at
+6. review the discovered capabilities + acceptance gates elmo inferred
+7. watch live training counters (accepted / rejected / step / score),
+   then **save to elmo model hub**
+
+no terminal required after `./up`.
+
+## cli (after `./up`)
+
+once the venv is set up, the elmo binary is in `.venv/bin/`. activate or
+prefix:
+
+```sh
+source .venv/bin/activate
+
+elmo run examples/function-calling.yaml     # headless anchor task
+elmo run examples/math.yaml                 # gsm8k
+elmo run examples/json-structured.yaml      # structured extraction
+elmo runs                                   # list past runs
+elmo hub list                               # base + fine-tuned models
+elmo regression list                        # permanent test cases
+elmo trajectory list                        # local public-prior corpus
+elmo preset apply free-openrouter           # one-line free-tier wiring
+elmo doctor                                 # what is wired on this machine
+elmo system                                 # hardware probe
+```
+
+## install standalone (no clone)
+
+if you just want the package without the dev scripts:
+
+```sh
+# apple silicon
+pip install "elmo-harness[mlx,ui] @ git+https://github.com/sangwansahil/elmo-harness"
+
+# nvidia
+pip install "elmo-harness[cuda,ui] @ git+https://github.com/sangwansahil/elmo-harness"
+```
+
+then `elmo onboard` directly.
 
 a single run prints a before/after number, writes artifacts to `./runs/<id>/`, and logs the run to a local sqlite database (`./.elmo/elmo.db`).
 

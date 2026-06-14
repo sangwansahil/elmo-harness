@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# elmo up — bootstrap if needed, start the daemon, open the browser.
+# idempotent. safe to re-run.
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO_ROOT"
+
+PORT="${ELMO_PORT:-7777}"
+PID_FILE=".elmo/daemon.pid"
+LOG=".elmo/daemon.log"
+
+say() { printf "  elmo  ::  %s\n" "$*"; }
+die() { printf "  elmo  ::  %s\n" "$*" >&2; exit 1; }
+
+# already running?
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  PID=$(cat "$PID_FILE")
+  say "already running (pid $PID) at http://127.0.0.1:$PORT"
+  command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT/#/onboard" || true
+  exit 0
+fi
+rm -f "$PID_FILE"
+
+# uv
+if ! command -v uv >/dev/null 2>&1; then
+  say "installing uv (one-time)"
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+fi
+export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+command -v uv >/dev/null 2>&1 || die "uv install failed. add ~/.local/bin to your PATH and retry."
+
+# venv
+if [ ! -d .venv ]; then
+  say "creating .venv (python 3.12)"
+  uv venv --python 3.12 >/dev/null
+fi
+
+# pick the hardware extra
+EXTRA="mlx"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  EXTRA="cuda"
+fi
+
+# sync deps (fast — uv hits cache after the first run)
+if [ ! -x ".venv/bin/elmo" ]; then
+  say "installing deps [$EXTRA,ui]"
+  uv pip install -e ".[$EXTRA,ui]" >/dev/null
+fi
+
+# port check
+if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  die "port $PORT is busy. run ./down first or set ELMO_PORT=<other>."
+fi
+
+mkdir -p .elmo
+: > "$LOG"
+
+# launch in the background
+.venv/bin/elmo serve --port "$PORT" >>"$LOG" 2>&1 &
+PID=$!
+echo "$PID" > "$PID_FILE"
+say "starting daemon (pid $PID)"
+
+# wait up to 15s for /api/health
+for i in $(seq 1 30); do
+  if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+    say "up at http://127.0.0.1:$PORT  ·  logs: tail -f $LOG"
+    command -v open >/dev/null 2>&1 && open "http://127.0.0.1:$PORT/#/onboard" || true
+    exit 0
+  fi
+  if ! kill -0 "$PID" 2>/dev/null; then
+    say "daemon exited early. last 20 log lines:"
+    tail -n 20 "$LOG" >&2 || true
+    rm -f "$PID_FILE"
+    exit 1
+  fi
+  sleep 0.5
+done
+
+say "daemon did not respond on $PORT in 15s. logs:"
+tail -n 20 "$LOG" >&2 || true
+exit 1
