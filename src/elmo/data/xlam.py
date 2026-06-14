@@ -84,14 +84,36 @@ def load_xlam_function_calling(
     Returns a list of {"messages": [...], "_eval": {...}} dicts. The "_eval" key
     is stripped before writing training jsonl; it is retained so the same rows
     can drive evaluation.
+
+    xLAM is gated on Hugging Face. You need to: (1) request access on
+    https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k,
+    (2) set HF_TOKEN in your env. If you'd rather avoid that, pick the
+    `synthetic:function-calling` source — the wizard uses that by default.
     """
+    import os
+
     from datasets import load_dataset  # type: ignore
 
-    ds = load_dataset(
-        "Salesforce/xlam-function-calling-60k",
-        split=split,
-        cache_dir=str(cache_dir) if cache_dir else None,
-    )
+    token = os.environ.get("HF_TOKEN")
+    try:
+        ds = load_dataset(
+            "Salesforce/xlam-function-calling-60k",
+            split=split,
+            cache_dir=str(cache_dir) if cache_dir else None,
+            token=token,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "gated" in msg.lower() or "401" in msg or "403" in msg or "Access" in msg:
+            raise RuntimeError(
+                "xLAM is a gated dataset on Hugging Face. "
+                "Either (a) accept the terms at "
+                "https://huggingface.co/datasets/Salesforce/xlam-function-calling-60k "
+                "and set HF_TOKEN in your env, "
+                "or (b) edit the spec to use 'synthetic:function-calling' "
+                "(the wizard default — works offline, no auth required)."
+            ) from e
+        raise
     rows: list[dict] = []
     for r in ds:
         formatted = _row_to_messages(dict(r))

@@ -293,9 +293,19 @@ async function renderRun(runId) {
 
 function eventLine(e) {
   const line = el("div", {});
+  const isErr = e.level === "error" || /^Error|Traceback|Exception|error: /.test(e.message || "");
+  const isMulti = (e.message || "").includes("\n");
   line.appendChild(el("span", { class: "ts" }, fmt.hms(e.created_at)));
-  line.appendChild(el("span", { class: "stg" }, e.stage));
-  line.appendChild(document.createTextNode(e.message));
+  line.appendChild(el("span", { class: "stg" + (isErr ? " err-head" : "") }, e.stage));
+  if (isMulti) {
+    // First line stays inline, the rest go into a styled block below.
+    const [first, ...rest] = e.message.split("\n");
+    line.appendChild(document.createTextNode(first));
+    const block = el("div", { class: "multi" }, rest.join("\n"));
+    line.appendChild(block);
+  } else {
+    line.appendChild(document.createTextNode(e.message));
+  }
   return line;
 }
 

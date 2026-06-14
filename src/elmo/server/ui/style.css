@@ -212,9 +212,23 @@ code { font-family: var(--font-mono); font-size: 12px; color: var(--accent); }
 .chip[data-status="future"] { color: var(--ink-fade); border-style: dashed; }
 
 /* log feed */
-.log { font-family: var(--font-mono); font-size: 12px; line-height: 2; color: var(--ink-muted); max-height: 320px; overflow-y: auto; }
-.log .ts { color: var(--ink-fade); margin-right: 10px; }
+.log { font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--ink-muted); max-height: 360px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
+.log > div { padding: 1px 0; }
+.log .ts { color: var(--ink-fade); margin-right: 10px; user-select: none; }
 .log .stg { display: inline-block; width: 64px; color: var(--ink-2); }
+.log .multi {
+  display: block;
+  background: var(--bg);
+  border-left: 2px solid var(--fail);
+  padding: 8px 12px;
+  margin: 6px 0 6px 74px;
+  font-size: 11px;
+  color: var(--ink-muted);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.log .err-head { color: var(--fail); }
 
 /* receipt */
 .receipt {

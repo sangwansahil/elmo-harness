@@ -71,6 +71,9 @@ def discover_task(prompt: str, base_model_hf_id: str) -> TaskSpec:
     name = _slug(prompt)
 
     if guess.kind == "function-calling":
+        # synthetic seed by default — xLAM is gated and requires HF access
+        # request + token. power users with explicit access can edit the
+        # spec to point at hf:Salesforce/xlam-function-calling-60k.
         return TaskSpec(
             name=name,
             prompt=prompt,
@@ -81,9 +84,9 @@ def discover_task(prompt: str, base_model_hf_id: str) -> TaskSpec:
                 Capability(name="arguments", description="extract correct arguments", verifier="json_schema", weight=1.5),
                 Capability(name="parallel_calls", description="emit multiple calls when warranted", verifier="function_call", weight=1.0),
             ],
-            dataset=DatasetRef(source="hf:Salesforce/xlam-function-calling-60k", split="train", max_rows=2000),
+            dataset=DatasetRef(source="synthetic:function-calling", split="train", max_rows=240),
             train=TrainConfig(method="lora", max_steps=200, lora_rank=16, learning_rate=2e-4, batch_size=4),
-            eval=EvalConfig(benchmark="bfcl-simple", max_examples=100, target_score=0.75),
+            eval=EvalConfig(benchmark="bfcl-simple", max_examples=40, target_score=0.75),
             budget=Budget(max_iterations=1, max_dollars=0.0, max_wallclock_hours=2.0),
             foundry=FoundryConfig(enabled=False),
             roles=RolesSpec(),
