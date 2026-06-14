@@ -57,6 +57,34 @@ def list_active() -> list[DownloadState]:
         return list(_active.values())
 
 
+_cancel_flags: dict[str, threading.Event] = {}
+
+
+def cancel(download_id: str) -> bool:
+    """Signal a running download to stop. Returns True if a flag was set."""
+    flag = _cancel_flags.get(download_id)
+    if flag is None:
+        return False
+    flag.set()
+    return True
+
+
+def _wipe_partial(target_dir: "Path | None") -> int:
+    """Remove a partial download directory. Returns bytes freed (approximate)."""
+    if not target_dir or not target_dir.exists():
+        return 0
+    import shutil
+    freed = 0
+    for p in target_dir.rglob("*"):
+        if p.is_file():
+            try:
+                freed += p.stat().st_size
+            except OSError:
+                pass
+    shutil.rmtree(target_dir, ignore_errors=True)
+    return freed
+
+
 def _do_download(state: DownloadState, hf_id: str) -> None:
     try:
         from huggingface_hub import snapshot_download  # type: ignore
@@ -67,13 +95,15 @@ def _do_download(state: DownloadState, hf_id: str) -> None:
         _persist(state)
         return
 
+    target_dir = hub_root() / "base" / hf_id.replace("/", "__")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _cancel_flags[state.id] = threading.Event()
+
     try:
         state.status = "downloading"
         _persist(state)
-        # We don't have a great granular hook here; snapshot_download is mostly
-        # opaque to byte counts unless we tee. We poll the cache dir to estimate.
-        target_dir = hub_root() / "base" / hf_id.replace("/", "__")
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # snapshot_download is opaque to byte counts unless we tee. Poll the
+        # cache dir to estimate progress.
 
         # Spawn a poller that updates bytes_downloaded based on disk usage.
         stop_flag = threading.Event()
@@ -119,11 +149,13 @@ def _do_download(state: DownloadState, hf_id: str) -> None:
 
         register_base(hf_id=hf_id, display_name=state.display_name, path=local_path)
     except Exception as e:  # noqa: BLE001
-        state.status = "error"
-        state.error = repr(e)
+        freed = _wipe_partial(target_dir)
+        state.status = "cancelled" if _cancel_flags.get(state.id, threading.Event()).is_set() else "error"
+        state.error = f"{e!r}  (cleaned up {freed // (1024 * 1024)} MB of partial files)"
         state.finished_at = time.time()
         _persist(state)
     finally:
+        _cancel_flags.pop(state.id, None)
         with _lock:
             _active.pop(state.id, None)
 

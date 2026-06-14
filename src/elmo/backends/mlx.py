@@ -98,6 +98,8 @@ class MLXBackend:
         temperature: float = 0.0,
     ) -> list[str]:
         self._require_mlx()
+        import json as _json
+
         from mlx_lm import generate, load  # type: ignore
 
         if adapter_path and adapter_path.exists():
@@ -105,15 +107,55 @@ class MLXBackend:
         else:
             model, tokenizer = load(model_id)
 
+        # mlx-lm 0.31 replaced the `temp=` kwarg with a sampler callable.
+        # The legacy path (older releases) is kept as a fallback.
+        sampler = None
+        try:
+            from mlx_lm.sample_utils import make_sampler  # type: ignore
+            sampler = make_sampler(temp=temperature)
+        except ImportError:
+            pass
+
         outputs: list[str] = []
-        for prompt in prompts:
-            text = generate(
-                model,
-                tokenizer,
-                prompt=prompt,
-                max_tokens=max_tokens,
-                temp=temperature,
-                verbose=False,
-            )
+        for raw_prompt in prompts:
+            prompt = _format_for_chat(raw_prompt, tokenizer)
+            kwargs: dict[str, Any] = {"max_tokens": max_tokens, "verbose": False}
+            if sampler is not None:
+                kwargs["sampler"] = sampler
+            else:
+                kwargs["temp"] = temperature  # type: ignore[assignment]
+            text = generate(model, tokenizer, prompt=prompt, **kwargs)
             outputs.append(text)
         return outputs
+
+
+def _format_for_chat(raw_prompt: str, tokenizer: Any) -> str:
+    """Detect a json-encoded chat envelope and apply the tokenizer's chat
+    template; otherwise wrap a plain string as a single user turn.
+
+    The evaluators emit prompts shaped like
+        json.dumps({"messages": [...]})
+    so the model sees real chat-template tokens. A bare user message
+    (used by the wizard probe step) is also wrapped here.
+    """
+    import json as _json
+
+    if not hasattr(tokenizer, "apply_chat_template"):
+        return raw_prompt
+
+    messages = None
+    s = raw_prompt.strip()
+    if s.startswith("{") and '"messages"' in s:
+        try:
+            obj = _json.loads(s)
+            if isinstance(obj, dict) and isinstance(obj.get("messages"), list):
+                messages = obj["messages"]
+        except _json.JSONDecodeError:
+            messages = None
+
+    if messages is None:
+        messages = [{"role": "user", "content": raw_prompt}]
+
+    return tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )

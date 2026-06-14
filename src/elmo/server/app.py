@@ -232,6 +232,7 @@ def create_app(paths: Paths | None = None):
     @app.post("/api/probe")
     def probe_model(payload: dict):
         """Smoke-test a downloaded base model with one prompt."""
+        import traceback
         from elmo.backends import get_backend
         from elmo.config import detect_backend
 
@@ -242,10 +243,52 @@ def create_app(paths: Paths | None = None):
         backend_name = payload.get("backend") or detect_backend()
         if backend_name == "none":
             raise HTTPException(400, "no local backend available on this machine")
-        backend = get_backend(backend_name)
-        out = backend.generate(model_id=hf_id, adapter_path=None,
-                               prompts=[prompt], max_tokens=128)
+        try:
+            backend = get_backend(backend_name)
+            out = backend.generate(model_id=hf_id, adapter_path=None,
+                                   prompts=[prompt], max_tokens=128)
+        except Exception as e:
+            tb = traceback.format_exc()
+            # Surface the actual failure as JSON instead of a 500 Internal Server
+            # Error html body the client can't parse. Truncate to keep payloads small.
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": type(e).__name__,
+                    "message": str(e),
+                    "traceback": tb.splitlines()[-12:],
+                    "hint": "see `.elmo/daemon.log` for the full trace.",
+                },
+            ) from e
         return {"prompt": prompt, "completion": out[0] if out else "", "model": hf_id}
+
+    @app.post("/api/downloads/{download_id}/cancel")
+    def cancel_download(download_id: str):
+        from elmo.download import cancel, get_state
+        ok = cancel(download_id)
+        st = get_state(download_id)
+        return {"ok": ok, "state": asdict_state(st) if st else None}
+
+    @app.get("/api/logs")
+    def tail_logs(tail: int = 100):
+        """Tail .elmo/daemon.log. Used by the ui to surface server-side
+        traces inline next to client-side errors."""
+        log_path = Path.cwd() / ".elmo" / "daemon.log"
+        if not log_path.exists():
+            return {"path": str(log_path), "lines": [], "exists": False}
+        tail = max(1, min(tail, 500))
+        # cheap tail: read last N lines without slurping the whole file.
+        try:
+            with log_path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                block = min(size, 64 * 1024)
+                f.seek(size - block)
+                buf = f.read().decode("utf-8", errors="replace")
+            lines = buf.splitlines()[-tail:]
+        except OSError as e:
+            lines = [f"<read failed: {e}>"]
+        return {"path": str(log_path), "lines": lines, "exists": True}
 
     @app.get("/api/hub")
     def hub_list(kind: str | None = None):

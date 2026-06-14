@@ -30,6 +30,90 @@ async function api(path) {
   return r.json();
 }
 
+async function readErr(r) {
+  // Always returns a structured error object — never throws inside the parser.
+  try {
+    const body = await r.json();
+    if (body && typeof body.detail === "object") return body.detail;
+    if (body && body.detail) return { error: "ServerError", message: String(body.detail) };
+    return { error: "ServerError", message: JSON.stringify(body) };
+  } catch {
+    try {
+      const t = await r.text();
+      return { error: "ServerError", message: (t || `http ${r.status}`).slice(0, 600) };
+    } catch {
+      return { error: "ServerError", message: `http ${r.status}` };
+    }
+  }
+}
+
+function errPanel(err, opts = {}) {
+  const wrap = el("div", {
+    style: {
+      marginTop: "10px",
+      padding: "12px 14px",
+      background: "var(--surface-2)",
+      borderLeft: "2px solid var(--fail)",
+      borderRadius: "var(--radius-sm)",
+    },
+  });
+  wrap.appendChild(el("div", { class: "lab", style: { color: "var(--fail)" } },
+    err.error || "error"));
+  wrap.appendChild(el("div", { class: "mo", style: { fontSize: "12px", marginTop: "4px", color: "var(--ink-2)" } },
+    err.message || "(no message)"));
+  if (err.hint) {
+    wrap.appendChild(el("div", { class: "micro", style: { marginTop: "8px" } }, err.hint));
+  }
+  if (err.traceback && err.traceback.length) {
+    const pre = el("pre", {
+      style: {
+        marginTop: "8px",
+        padding: "10px 12px",
+        background: "var(--bg)",
+        fontFamily: "var(--font-mono)",
+        fontSize: "11px",
+        color: "var(--ink-muted)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        borderRadius: "var(--radius-sm)",
+        maxHeight: "180px",
+        overflowY: "auto",
+      },
+    }, err.traceback.join("\n"));
+    wrap.appendChild(pre);
+  }
+  const actions = el("div", { style: { marginTop: "10px", display: "flex", gap: "8px" } });
+  const logBtn = el("button", { class: "btn ghost", style: { fontSize: "11px" } }, "view daemon log");
+  logBtn.addEventListener("click", async () => {
+    logBtn.setAttribute("disabled", "true");
+    logBtn.textContent = "loading…";
+    try {
+      const body = await api("/api/logs?tail=60");
+      const pre = el("pre", {
+        style: {
+          marginTop: "8px", padding: "10px 12px", background: "var(--bg)",
+          fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--ink-muted)",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+          borderRadius: "var(--radius-sm)", maxHeight: "320px", overflowY: "auto",
+        },
+      }, body.lines.join("\n"));
+      wrap.appendChild(el("div", { class: "micro", style: { marginTop: "10px" } }, body.path));
+      wrap.appendChild(pre);
+      logBtn.remove();
+    } catch (e) {
+      logBtn.removeAttribute("disabled");
+      logBtn.textContent = "view daemon log";
+    }
+  });
+  actions.appendChild(logBtn);
+  if (opts.onRetry) {
+    const retry = el("button", { class: "btn ghost", style: { fontSize: "11px" }, onclick: opts.onRetry }, "retry");
+    actions.appendChild(retry);
+  }
+  wrap.appendChild(actions);
+  return wrap;
+}
+
 function el(tag, props = {}, children = []) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) {
@@ -483,17 +567,32 @@ async function renderStepProbe() {
   const sendBtn = el("button", { class: "btn primary" }, "send →");
   sendBtn.addEventListener("click", async () => {
     sendBtn.setAttribute("disabled", "true");
-    out.textContent = "thinking…";
+    out.textContent = "thinking… (first call loads the weights, takes a few seconds)";
+    // remove any prior error panel
+    const prior = card.querySelector(".probe-err");
+    if (prior) prior.remove();
     try {
       const r = await fetch("/api/probe", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ hf_id: m.hf_id_mlx, prompt: inp.value }),
       });
-      const body = await r.json();
-      out.textContent = body.completion || body.detail || "(no output)";
-      if (r.ok) wizardState.probe_done = true;
+      if (!r.ok) {
+        const err = await readErr(r);
+        const panel = errPanel(err, { onRetry: () => sendBtn.click() });
+        panel.classList.add("probe-err");
+        card.appendChild(panel);
+        out.textContent = "(no output)";
+      } else {
+        const body = await r.json();
+        out.textContent = body.completion || "(empty response)";
+        wizardState.probe_done = true;
+      }
     } catch (e) {
-      out.textContent = `probe failed: ${e}`;
+      const panel = errPanel({ error: "NetworkError", message: String(e) },
+                              { onRetry: () => sendBtn.click() });
+      panel.classList.add("probe-err");
+      card.appendChild(panel);
+      out.textContent = "(no output)";
     }
     sendBtn.removeAttribute("disabled");
     if (wizardState.probe_done) {

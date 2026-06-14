@@ -309,6 +309,83 @@ def preset(
 
 
 @app.command()
+def logs(tail: int = typer.Option(100, "--tail", "-n"),
+         follow: bool = typer.Option(False, "--follow", "-f")) -> None:
+    """Tail the daemon log at .elmo/daemon.log."""
+    import subprocess
+    log = Path.cwd() / ".elmo" / "daemon.log"
+    if not log.exists():
+        console.print(f"[dim]no log yet at {log}[/dim]")
+        return
+    cmd = ["tail", f"-n{tail}"] + (["-f"] if follow else []) + [str(log)]
+    subprocess.run(cmd)
+
+
+@app.command()
+def nuke(
+    yes: bool = typer.Option(False, "--yes", "-y", help="skip confirmation"),
+    keep_models: bool = typer.Option(False, "--keep-models", help="leave ~/.elmo-hub alone"),
+) -> None:
+    """Wipe everything elmo wrote: .venv, .elmo, runs/, and (unless --keep-models) ~/.elmo-hub.
+
+    Lean and minimal: when something goes sideways and you want a clean slate,
+    this is the one command. Stops the daemon first if it's running."""
+    import shutil
+
+    root = Path.cwd()
+    targets = [
+        root / ".venv",
+        root / ".elmo",
+        root / "runs",
+    ]
+    if not keep_models:
+        targets.append(Path.home() / ".elmo-hub")
+
+    existing = [p for p in targets if p.exists()]
+    if not existing:
+        console.print("[dim]nothing to clean.[/dim]")
+        return
+
+    total_bytes = 0
+    for p in existing:
+        for f in p.rglob("*"):
+            if f.is_file():
+                try:
+                    total_bytes += f.stat().st_size
+                except OSError:
+                    pass
+    gb = total_bytes / (1024**3)
+
+    console.print("[yellow]will remove[/yellow]:")
+    for p in existing:
+        console.print(f"  {p}")
+    console.print(f"[dim]reclaim:[/dim] ~{gb:.2f} GB")
+
+    if not yes:
+        if not typer.confirm("\nproceed?"):
+            console.print("[dim]cancelled.[/dim]")
+            return
+
+    # Stop the daemon first if a pid file is present.
+    pid_file = root / ".elmo" / "daemon.pid"
+    if pid_file.exists():
+        try:
+            import os
+            import signal
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, signal.SIGTERM)
+            console.print(f"[dim]sent SIGTERM to daemon pid {pid}[/dim]")
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+
+    for p in existing:
+        shutil.rmtree(p, ignore_errors=True)
+        console.print(f"  [green]rm[/green] {p}")
+
+    console.print(f"\n[green]nuked.[/green] reclaimed ~{gb:.2f} GB. run `./up` to start fresh.")
+
+
+@app.command()
 def system() -> None:
     """Probe this machine — chip, RAM, disk, suggested backend."""
     from elmo.system import probe
