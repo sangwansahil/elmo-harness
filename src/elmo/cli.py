@@ -309,6 +309,80 @@ def preset(
 
 
 @app.command()
+def system() -> None:
+    """Probe this machine — chip, RAM, disk, suggested backend."""
+    from elmo.system import probe
+
+    p = probe()
+    console.print(f"[dim]os[/dim]            {p.os} ({p.arch})")
+    console.print(f"[dim]chip[/dim]          {p.chip}")
+    if p.chip_class == "apple-silicon":
+        console.print(f"[dim]tier[/dim]          {p.chip_tier}")
+    console.print(f"[dim]ram[/dim]           {p.ram_gb} GB")
+    console.print(f"[dim]free disk[/dim]     {p.free_disk_gb} GB")
+    if p.gpu_name:
+        console.print(f"[dim]gpu[/dim]           {p.gpu_name} ({p.gpu_vram_gb} GB VRAM)")
+    console.print(f"[dim]backend[/dim]       [bold]{p.suggested_backend}[/bold]")
+
+
+@app.command(name="hub")
+def hub_cli(action: str = typer.Argument("list", help="list | rm <id>"),
+            entry_id: str | None = typer.Argument(None)) -> None:
+    """List or remove entries in the local model hub."""
+    from elmo.hub import list_models, remove
+
+    if action == "list":
+        entries = list_models()
+        if not entries:
+            console.print("[dim]hub is empty.[/dim]  try [bold]elmo onboard[/bold] to download a base model.")
+            return
+        t = Table(show_header=True, header_style="dim", border_style="dim")
+        for col in ("id", "kind", "name", "source", "size", "score Δ"):
+            t.add_column(col, style="dim" if col == "id" else None)
+        for e in entries:
+            delta = (e.final_score - e.baseline_score) if (e.final_score is not None and e.baseline_score is not None) else None
+            t.add_row(
+                e.id, e.kind, e.display_name,
+                e.hf_id if e.kind == "base" else f"{e.task_name} ← {e.hf_id.split('/')[-1]}",
+                f"{e.size_gb} GB",
+                f"{delta:+.3f}" if delta is not None else "—",
+            )
+        console.print(t)
+    elif action == "rm":
+        if not entry_id:
+            console.print("[red]rm needs an entry id[/red]")
+            raise typer.Exit(2)
+        ok = remove(entry_id)
+        console.print(f"[yellow]removed[/yellow] {entry_id}" if ok else f"[red]no such entry[/red]: {entry_id}")
+    else:
+        console.print(f"[red]unknown action: {action}[/red]")
+        raise typer.Exit(2)
+
+
+@app.command()
+def onboard(port: int = typer.Option(7777, "--port", "-p"),
+            no_browser: bool = typer.Option(False, "--no-browser")) -> None:
+    """Open the onboarding wizard in your browser, starting the daemon if needed."""
+    try:
+        from elmo.server import serve as _serve
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(2)
+    if not no_browser:
+        import threading
+        import time
+        import webbrowser
+
+        def _open():
+            time.sleep(1.2)
+            webbrowser.open(f"http://127.0.0.1:{port}/#/onboard")
+
+        threading.Thread(target=_open, daemon=True).start()
+    console.print(f"[dim]elmo onboarding[/dim] http://127.0.0.1:{port}/#/onboard")
+    _serve(host="127.0.0.1", port=port, reload=False)
+
+
+@app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(7777, "--port", "-p"),

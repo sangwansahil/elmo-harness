@@ -265,6 +265,349 @@ async function renderRegression(task) {
   }
 }
 
+// --- onboarding wizard ---------------------------------------------------
+const WIZARD_STEPS = ["diagnose", "choose", "download", "probe", "task", "data"];
+const wizardState = {
+  step: 0,
+  system: null,
+  models: [],
+  picked: null,
+  download_id: null,
+  download_path: null,
+  probe_done: false,
+  task_text: "",
+};
+
+function pip(filled, n = 5, accent = false) {
+  const wrap = el("div", { class: "pips" });
+  for (let i = 0; i < n; i++) {
+    wrap.appendChild(el("div", {
+      class: "pip" + (i < filled ? (accent ? " accent" : " on") : ""),
+    }));
+  }
+  return wrap;
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`;
+}
+
+function wizardRail() {
+  const r = el("div", { class: "wiz-rail" });
+  WIZARD_STEPS.forEach((name, i) => {
+    const cls = "step" + (i === wizardState.step ? " on" : i < wizardState.step ? " done" : "");
+    r.appendChild(el("div", { class: cls }, `${String(i + 1).padStart(2, "0")} ${name}`));
+    if (i < WIZARD_STEPS.length - 1) r.appendChild(el("span", { class: "sep" }, "·"));
+  });
+  return r;
+}
+
+async function renderOnboard() {
+  setActiveNav("nav-onboard");
+  view.innerHTML = "";
+  view.appendChild(el("h1", {}, "onboard"));
+  view.appendChild(el("p", { class: "micro" }, "we'll size your hardware, pick a base model, download it, and kick off a fine-tune."));
+  view.appendChild(wizardRail());
+
+  if (wizardState.step === 0) return renderStepDiagnose();
+  if (wizardState.step === 1) return renderStepChoose();
+  if (wizardState.step === 2) return renderStepDownload();
+  if (wizardState.step === 3) return renderStepProbe();
+  if (wizardState.step === 4) return renderStepTask();
+  if (wizardState.step === 5) return renderStepData();
+}
+
+async function renderStepDiagnose() {
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "lab" }, "system probe"));
+  card.appendChild(el("p", { class: "micro" }, "reading your hardware…"));
+  view.appendChild(card);
+  try {
+    const data = await api("/api/catalog");
+    wizardState.system = data.system;
+    wizardState.models = data.models;
+    card.innerHTML = "";
+    card.appendChild(el("div", { class: "lab" }, "system probe"));
+    const dl = el("dl", { class: "kv" });
+    for (const [k, v] of [
+      ["chip", data.system.chip],
+      ["arch", data.system.arch],
+      ["ram", `${data.system.ram_gb} GB`],
+      ["free disk", `${data.system.free_disk_gb} GB`],
+      ["gpu", data.system.gpu_name || "(none)"],
+      ["backend", data.system.suggested_backend],
+    ]) {
+      dl.appendChild(el("dt", {}, k));
+      dl.appendChild(el("dd", { class: "mo" }, String(v)));
+    }
+    card.appendChild(dl);
+    const ok = data.system.suggested_backend !== "none";
+    const msg = ok
+      ? "looks good. we'll pick base models that fit comfortably."
+      : "no local training backend detected. fine-tuning needs apple silicon or nvidia. you can still proceed to read-only mode.";
+    card.appendChild(el("p", { class: "micro", style: { marginTop: "12px" } }, msg));
+    const next = el("button", { class: "btn primary", onclick: () => { wizardState.step = 1; route(); } }, "next →");
+    card.appendChild(next);
+  } catch (e) {
+    card.innerHTML = `<p class="micro">probe failed: ${e}</p>`;
+  }
+}
+
+function renderStepChoose() {
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "lab" }, "pick a base model"));
+  card.appendChild(el("p", { class: "micro" }, "speed = approx tokens / second for this machine. intelligence = relative capability."));
+  const grid = el("div", { class: "model-grid" });
+  for (const r of wizardState.models) {
+    const m = r.model;
+    const disabled = !r.fits;
+    const picked = wizardState.picked && wizardState.picked.id === m.id;
+    const cls = "mod" + (picked ? " on" : "") + (r.elmo_choice ? " choice" : "") + (disabled ? " disabled" : "");
+    const cardEl = el("div", { class: cls });
+    const head = el("div", { class: "mod-head" });
+    head.appendChild(el("h3", {}, m.display_name));
+    if (r.elmo_choice) head.appendChild(el("span", { class: "pill" }, "elmo's choice"));
+    cardEl.appendChild(head);
+    cardEl.appendChild(el("div", { class: "mod-meta" }, `${m.params_b}B · 4-bit · ${m.disk_4bit_gb}GB · ${m.specialty}`));
+    cardEl.appendChild(el("div", { class: "mod-note" }, m.note));
+    const bars = el("div", { class: "bars" });
+    bars.appendChild(el("span", { class: "lab" }, "speed"));
+    bars.appendChild(pip(m.speed, 5, r.elmo_choice));
+    bars.appendChild(el("span", { class: "val" }, `${r.tokps_estimate} tok/s`));
+    bars.appendChild(el("span", { class: "lab" }, "smarts"));
+    bars.appendChild(pip(m.intelligence, 5, r.elmo_choice));
+    bars.appendChild(el("span", { class: "val" }, `${m.intelligence}/5`));
+    cardEl.appendChild(bars);
+    if (!r.fits) cardEl.appendChild(el("p", { class: "micro", style: { marginTop: "10px" } }, r.reason));
+    cardEl.addEventListener("click", () => {
+      if (disabled) return;
+      wizardState.picked = m;
+      renderStepChoose();  // re-render in place
+    });
+    grid.appendChild(cardEl);
+  }
+  card.appendChild(grid);
+  view.querySelectorAll(".card").forEach((c) => c.remove());
+  view.appendChild(card);
+
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "16px" } });
+  actions.appendChild(el("button", { class: "btn ghost", onclick: () => { wizardState.step = 0; route(); } }, "← back"));
+  const next = el("button", {
+    class: "btn primary",
+    onclick: () => { if (wizardState.picked) { wizardState.step = 2; route(); } },
+  }, wizardState.picked ? `download ${wizardState.picked.display_name} →` : "pick a model");
+  if (!wizardState.picked) next.setAttribute("disabled", "true");
+  actions.appendChild(next);
+  view.appendChild(actions);
+}
+
+async function renderStepDownload() {
+  const m = wizardState.picked;
+  if (!m) { wizardState.step = 1; return route(); }
+  const card = el("div", { class: "card dl-card" });
+  card.appendChild(el("div", { class: "lab" }, `download ${m.display_name}`));
+  card.appendChild(el("div", { class: "mo", style: { fontSize: "12px", color: "var(--ink-muted)" } }, m.hf_id_mlx));
+  const barWrap = el("div", { class: "dl-bar" });
+  const fill = el("div", { class: "fill", style: { width: "0%" } });
+  barWrap.appendChild(fill);
+  card.appendChild(barWrap);
+  const meta = el("div", { class: "dl-meta" });
+  meta.appendChild(el("span", { id: "dl-progress" }, "queueing…"));
+  meta.appendChild(el("span", { id: "dl-rate" }, ""));
+  card.appendChild(meta);
+  const msg = el("div", { class: "dl-msg", id: "dl-msg" }, "");
+  card.appendChild(msg);
+  view.appendChild(card);
+
+  if (!wizardState.download_id) {
+    try {
+      const start = await fetch(`/api/models/${m.id}/download`, { method: "POST" });
+      const body = await start.json();
+      wizardState.download_id = body.download_id;
+    } catch (e) {
+      msg.textContent = `start failed: ${e}`;
+      return;
+    }
+  }
+
+  const totalBytes = m.disk_4bit_gb * (1024 ** 3);
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/downloads/${wizardState.download_id}/live`);
+  ws.onmessage = (ev) => {
+    const st = JSON.parse(ev.data);
+    const total = st.bytes_total || totalBytes;
+    const pct = Math.min(100, total ? (st.bytes_downloaded / total) * 100 : 0);
+    fill.style.width = `${pct.toFixed(1)}%`;
+    document.getElementById("dl-progress").textContent =
+      `${fmtBytes(st.bytes_downloaded)} / ${fmtBytes(total)}  ·  ${pct.toFixed(1)}%`;
+    document.getElementById("dl-msg").textContent = st.status;
+    if (st.status === "done") {
+      wizardState.download_path = st.path;
+      ws.close();
+      const next = el("button", { class: "btn primary", onclick: () => { wizardState.step = 3; route(); } }, "model ready · probe it →");
+      next.style.marginTop = "14px";
+      card.appendChild(next);
+    } else if (st.status === "error") {
+      ws.close();
+      document.getElementById("dl-msg").textContent = `error: ${st.error}`;
+    }
+  };
+  ws.onerror = () => { document.getElementById("dl-msg").textContent = "websocket error"; };
+}
+
+async function renderStepProbe() {
+  const m = wizardState.picked;
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "lab" }, "say hi"));
+  card.appendChild(el("p", { class: "micro" }, "send one prompt to confirm the model loads. try a simple greeting first."));
+  const f = el("div", { class: "field" });
+  f.appendChild(el("label", {}, "prompt"));
+  const inp = el("input", { type: "text", value: "tell me one short fact about owls.", id: "probe-input" });
+  f.appendChild(inp);
+  card.appendChild(f);
+  const out = el("div", { class: "chat-out", id: "probe-out" }, "(no response yet)");
+  card.appendChild(out);
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "12px" } });
+  const sendBtn = el("button", { class: "btn primary" }, "send →");
+  sendBtn.addEventListener("click", async () => {
+    sendBtn.setAttribute("disabled", "true");
+    out.textContent = "thinking…";
+    try {
+      const r = await fetch("/api/probe", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ hf_id: m.hf_id_mlx, prompt: inp.value }),
+      });
+      const body = await r.json();
+      out.textContent = body.completion || body.detail || "(no output)";
+      if (r.ok) wizardState.probe_done = true;
+    } catch (e) {
+      out.textContent = `probe failed: ${e}`;
+    }
+    sendBtn.removeAttribute("disabled");
+    if (wizardState.probe_done) {
+      next.removeAttribute("disabled");
+    }
+  });
+  actions.appendChild(sendBtn);
+  const next = el("button", {
+    class: "btn ghost",
+    onclick: () => { wizardState.step = 4; route(); },
+    disabled: wizardState.probe_done ? null : "true",
+  }, "next: describe the task →");
+  actions.appendChild(next);
+  card.appendChild(actions);
+  view.appendChild(card);
+}
+
+function renderStepTask() {
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "lab" }, "what should this model be expert at?"));
+  card.appendChild(el("p", { class: "micro" }, "one sentence. elmo will pull data, generate scenarios, and kick off training."));
+  const f = el("div", { class: "field" });
+  f.appendChild(el("label", {}, "task"));
+  const ta = el("textarea", { id: "task-input" });
+  ta.value = wizardState.task_text || "build a function-calling expert that can handle parallel tool calls.";
+  f.appendChild(ta);
+  card.appendChild(f);
+  const ex = el("p", { class: "micro" }, "examples: \"convert dates and times across timezones\" · \"extract structured json from invoices\" · \"solve grade-school math word problems\"");
+  card.appendChild(ex);
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "10px" } });
+  actions.appendChild(el("button", { class: "btn ghost", onclick: () => { wizardState.step = 3; route(); } }, "← back"));
+  actions.appendChild(el("button", {
+    class: "btn primary",
+    onclick: () => { wizardState.task_text = ta.value.trim(); wizardState.step = 5; route(); },
+  }, "discover data →"));
+  card.appendChild(actions);
+  view.appendChild(card);
+}
+
+function renderStepData() {
+  // Phase-1 hook: kick off `elmo run` via CLI in the user's terminal. The UI
+  // can't safely shell out to the python backend mid-request, so this step
+  // hands the user a ready-to-run command and shows them where the live view
+  // will appear once the run starts.
+  const m = wizardState.picked;
+  const card = el("div", { class: "card" });
+  card.appendChild(el("div", { class: "lab" }, "ready to train"));
+  card.appendChild(el("p", { class: "micro" }, "elmo has everything it needs. start the run from your terminal:"));
+  const cmd = el("pre", {
+    style: {
+      background: "var(--surface-2)", padding: "12px 14px",
+      borderRadius: "var(--radius)", fontFamily: "var(--font-mono)",
+      fontSize: "12px", color: "var(--accent)", margin: "10px 0",
+      whiteSpace: "pre-wrap", wordBreak: "break-word",
+    },
+  }, `cat > examples/wizard.yaml <<'YAML'\nname: wizard\nprompt: ${wizardState.task_text}\nbase_model: ${m.hf_id_mlx}\nbackend: auto\ncapabilities:\n  - { name: correctness, verifier: judge, weight: 1.0 }\ndataset: { source: "synthetic:structured", split: train, max_rows: 200 }\ntrain: { method: lora, max_steps: 200 }\neval: { benchmark: bfcl-simple, max_examples: 50 }\nfoundry: { enabled: true, scenarios_per_brief: 30 }\nYAML\n\nelmo run examples/wizard.yaml`);
+  card.appendChild(cmd);
+  card.appendChild(el("p", { class: "micro" },
+    "once the run starts, its live view lands on the runs page. accepted vs rejected rows stream into the foundry log."));
+  const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "8px" } });
+  actions.appendChild(el("button", {
+    class: "btn primary",
+    onclick: () => { location.hash = "#/"; },
+  }, "view runs →"));
+  actions.appendChild(el("button", {
+    class: "btn ghost",
+    onclick: () => { wizardState.step = 0; route(); },
+  }, "restart wizard"));
+  card.appendChild(actions);
+  view.appendChild(card);
+}
+
+// --- model hub -----------------------------------------------------------
+async function renderHub() {
+  setActiveNav("nav-hub");
+  view.innerHTML = "";
+  view.appendChild(el("h1", {}, "model hub"));
+  view.appendChild(el("p", { class: "micro" }, "base models you've downloaded and fine-tunes you've saved."));
+  let data;
+  try { data = await api("/api/hub"); } catch { data = { entries: [] }; }
+  const bases = data.entries.filter((e) => e.kind === "base");
+  const tunes = data.entries.filter((e) => e.kind === "fine-tuned");
+
+  view.appendChild(el("h3", {}, `base models · ${bases.length}`));
+  if (!bases.length) {
+    view.appendChild(el("p", { class: "micro" }, "none yet. start the onboarding wizard to download one."));
+  } else {
+    const grid = el("div", { class: "card", style: { padding: "0" } });
+    for (const b of bases) {
+      grid.appendChild(hubRow(b));
+    }
+    view.appendChild(grid);
+  }
+
+  view.appendChild(el("h3", {}, `fine-tuned · ${tunes.length}`));
+  if (!tunes.length) {
+    view.appendChild(el("p", { class: "micro" }, "none yet. finish a run and save the result to the hub."));
+  } else {
+    const grid = el("div", { class: "card", style: { padding: "0" } });
+    for (const t of tunes) {
+      grid.appendChild(hubRow(t));
+    }
+    view.appendChild(grid);
+  }
+}
+
+function hubRow(entry) {
+  const a = el("div", { class: "row", style: { gridTemplateColumns: "1fr 200px 80px 80px 110px" } });
+  const left = el("div", {}, [
+    el("div", { class: "task" }, entry.display_name),
+    el("div", { class: "micro" }, entry.kind === "base" ? entry.hf_id : `${entry.task_name} · base ${entry.hf_id}`),
+  ]);
+  a.appendChild(left);
+  a.appendChild(el("span", { class: "mo when" }, entry.kind));
+  a.appendChild(el("span", { class: "mo base" }, `${entry.size_gb || 0} GB`));
+  const delta = entry.final_score != null && entry.baseline_score != null ? (entry.final_score - entry.baseline_score) : null;
+  a.appendChild(el("span", { class: `mo delta ${delta != null && delta >= 0 ? "up" : delta != null ? "down" : ""}` },
+    delta != null ? fmt.delta(delta) : "—"));
+  a.appendChild(el("span", { class: "mo when" }, fmt.ts(entry.added_at)));
+  return a;
+}
+
 // --- router --------------------------------------------------------------
 function setActiveNav(id) {
   $$(".nav a").forEach((a) => a.classList.remove("on"));
@@ -275,6 +618,8 @@ function setActiveNav(id) {
 async function route() {
   const h = location.hash || "#/";
   let m;
+  if (h === "#/onboard") return renderOnboard();
+  if (h === "#/hub") return renderHub();
   if (h === "#/") return renderRunsList();
   if ((m = h.match(/^#\/runs\/([^/]+)$/))) return renderRun(m[1]);
   if ((m = h.match(/^#\/regression\/([^/]+)$/))) return renderRegression(m[1]);
