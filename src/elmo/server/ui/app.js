@@ -392,13 +392,14 @@ function renderStepChoose() {
     if (!r.fits) cardEl.appendChild(el("p", { class: "micro", style: { marginTop: "10px" } }, r.reason));
     cardEl.addEventListener("click", () => {
       if (disabled) return;
-      wizardState.picked = m;
-      renderStepChoose();  // re-render in place
+      // Toggle: clicking the picked card unpicks it.
+      wizardState.picked = picked ? null : m;
+      // Fully re-render the step so the actions row + grid never duplicate.
+      renderOnboard();
     });
     grid.appendChild(cardEl);
   }
   card.appendChild(grid);
-  view.querySelectorAll(".card").forEach((c) => c.remove());
   view.appendChild(card);
 
   const actions = el("div", { style: { display: "flex", gap: "10px", marginTop: "16px" } });

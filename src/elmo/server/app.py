@@ -13,6 +13,19 @@ from typing import Any
 from elmo.config import Paths
 
 
+# WebSocket types must be importable from module scope so FastAPI's deferred-
+# annotation resolution (under `from __future__ import annotations`) succeeds
+# at route registration. Importing them inside create_app() leaves the route
+# registered as plain WebSocket but the dependency resolver couldn't bind the
+# parameter and Starlette rejected the upgrade with 403. We import lazily so
+# missing fastapi (in non-ui installs) is still surfaced via _require_fastapi.
+try:
+    from fastapi import WebSocket, WebSocketDisconnect  # noqa: F401
+except ImportError:  # pragma: no cover — surfaced by _require_fastapi later
+    WebSocket = object  # type: ignore[assignment,misc]
+    WebSocketDisconnect = Exception  # type: ignore[assignment,misc]
+
+
 def asdict_state(state) -> dict:
     return asdict(state)
 
@@ -36,12 +49,17 @@ def _require_fastapi() -> Any:
 
 def create_app(paths: Paths | None = None):
     fastapi = _require_fastapi()
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 
     paths = paths or Paths.from_cwd()
     paths.ensure()
+
+    # Initialize the SQLite schema up-front so the wizard can hit /api/runs
+    # before any `elmo run` has been executed. Storage() is idempotent.
+    from elmo.storage import Storage
+    Storage(paths.db)
 
     app = FastAPI(
         title="elmo daemon",

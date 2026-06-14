@@ -23,12 +23,14 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
 fi
 rm -f "$PID_FILE"
 
-# uv
+# uv — pre-extend PATH first so an already-installed uv at ~/.local/bin or
+# ~/.cargo/bin is found without re-installing on every fresh shell.
+export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 if ! command -v uv >/dev/null 2>&1; then
   say "installing uv (one-time)"
   curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+  export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 fi
-export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
 command -v uv >/dev/null 2>&1 || die "uv install failed. add ~/.local/bin to your PATH and retry."
 
 # venv
